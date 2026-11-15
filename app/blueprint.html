@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Loupe Blueprint</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@700;800&family=Figtree:wght@400;600;700&family=DM+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #eceef1; --surface: #ffffff; --ink: #15141a; --muted: #676675; --line: #d9dbe1; --marker: #e8247a; --marker-soft: #fde3ee; --film: #17151b;
+  --f-display: "Unbounded", "Arial Black", system-ui, sans-serif; --f-body: "Figtree", system-ui, sans-serif; --f-mono: "DM Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #121015; --surface: #1b1920; --ink: #f2eff5; --muted: #9d98a8; --line: #2f2c36; --marker: #ff4f98; --marker-soft: #3a1a2a; color-scheme: dark; } }
+:root[data-theme="dark"] { --bg: #121015; --surface: #1b1920; --ink: #f2eff5; --muted: #9d98a8; --line: #2f2c36; --marker: #ff4f98; --marker-soft: #3a1a2a; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--f-body); }
+.wrap { max-width: 860px; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 32px 80px; }
+a { color: var(--marker); }
+h1 { font: 800 clamp(28px, 5vw, 44px)/1.05 var(--f-display); letter-spacing: -0.03em; margin: 8px 0 12px; text-wrap: balance; }
+h1 em { font-style: normal; color: var(--marker); }
+h2 { font: 700 19px/1.25 var(--f-display); letter-spacing: -0.01em; margin: 44px 0 10px; text-wrap: balance; }
+h3 { font-size: 16px; margin: 22px 0 6px; }
+p, li { max-width: 68ch; }
+.eyebrow { font: 500 11px var(--f-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.lede { font-size: 18px; color: var(--muted); }
+.flow { display: grid; gap: 10px; margin: 16px 0; padding: 0; list-style: none; counter-reset: s; }
+.flow li { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 14px 56px; position: relative; max-width: none; }
+.flow li::before { counter-increment: s; content: counter(s); position: absolute; left: 16px; top: 14px; width: 26px; height: 26px; border-radius: 50%; background: var(--marker-soft); color: var(--marker); font: 500 12px/26px var(--f-mono); text-align: center; }
+.flow b { display: block; }
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); margin: 14px 0; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 560px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 11px var(--f-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+code { font: 13.5px var(--f-mono); background: var(--surface); border: 1px solid var(--line); padding: 1px 6px; border-radius: 5px; }
+.callout { border-left: 3px solid var(--marker); background: var(--surface); padding: 12px 16px; border-radius: 0 10px 10px 0; margin: 16px 0; }
+.back { font: 500 13px var(--f-mono); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="index.html">← Back to the studio</a>
+  <div class="eyebrow" style="margin-top:24px">Product blueprint · v0.2</div>
+  <h1>How Loupe <em>picks, edits and covers</em></h1>
+  <p class="lede">The studio is a working prototype that runs entirely in the browser. This page lays out each stage: what the prototype does today and what replaces it in production.</p>
+  <div class="callout"><b>v0.2 changes from testing.</b> Picks now learn your taste: Claude judges frames against your own posted photos, and every pick you add or remove retrains the ranker. Match my look edits faces only. Covers are reframed per app around the face.</div>
+
+  <h2>The pipeline</h2>
+  <ol class="flow">
+    <li><b>Style profile from past edits</b>A landmark face detector finds each face. Loupe measures how you retouch skin (brightness, warmth, rosiness, smoothness) and stores the overall style (tones, color, framing, embeddings) for picking. Confidence grows with every upload.</li>
+    <li><b>Brief parsing</b>“8 pics, warm film vibe, no closed eyes” becomes a pick count, editing offsets (warmth +, fade +, grain +) and selection preferences (weight faces higher).</li>
+    <li><b>Cluster on metadata</b>EXIF capture time and GPS split the shoot into scenes (a gap of 12+ minutes or a move of 300+ m starts a new one). Photos with no timestamps fall back to visual clustering.</li>
+    <li><b>Embed and find bursts</b>Every frame gets an embedding. Within a scene, cosine similarity merges near-duplicates into bursts, and only the best frame of each burst competes.</li>
+    <li><b>Score attractiveness</b>Nine signals (below), led by <i>your taste</i>, combined by a weight vector that's personal to each user.</li>
+    <li><b>Taste judge</b>Claude sees three of your posted photos next to batches of candidates and rates how likely you'd post each one, plus eyes, expression and angle. Whole bursts are judged together, so a blink loses to its sibling.</li>
+    <li><b>Pairwise ranker</b>“This or that” asks about the closest calls, and every manual pick or un-pick becomes training pairs too. Bradley–Terry / linear RankNet updates, persisted per user.</li>
+    <li><b>Diverse selection</b>Greedy MMR: highest score first, penalized for similarity to frames already picked, with a bonus for covering every scene.</li>
+    <li><b>Auto-edit (faces only)</b>Inside each detected face, skin brightness, warmth and rosiness shift toward your retouched faces, and smoothing is set automatically from the gap between this face's skin texture and yours. Eyes, brows and lips are protected by an edge-aware mask. The rest of the photo is untouched unless you move a slider.</li>
+    <li><b>Cover framing per app</b>For each platform, Loupe searches every zoom and position for the crop that puts the eyes at that feed's target height, sizes the face for its thumbnail, keeps the face clear of buttons and captions, and leaves calm space for titles where the feed uses them. It never zooms past roughly 720 real pixels of width.</li>
+  </ol>
+
+  <h2>Scoring “attractive”: the metrics</h2>
+  <p>The brief you shared says “IGA”. The field is usually called <b>IAA, Image Aesthetic Assessment</b>. It's one signal among several. A generic aesthetic score can't tell a blink from a smile, or your look from someone else's, so Loupe blends it with technical, face and personal signals.</p>
+  <div class="tbl"><table>
+    <thead><tr><th>Signal</th><th>Prototype (in browser)</th><th>Production</th></tr></thead>
+    <tbody>
+      <tr><td>Sharpness</td><td>Laplacian variance on the sharpest tiles, normalized within the scene</td><td>Same, plus subject-region focus from the face/person mask</td></tr>
+      <tr><td>Exposure</td><td>Distance from the scene's median brightness, clipping penalties</td><td>Same, plus a learned exposure-quality head</td></tr>
+      <tr><td>Your taste</td><td>Claude, shown your posted photos as examples; falls back to embedding similarity to your posts</td><td>A per-user ranker on CLIP/SigLIP embeddings, trained on picks, un-picks and posts</td></tr>
+      <tr><td>Face & expression</td><td>68-point landmarks in the browser (face-api / TF.js): eyes open from eye aspect ratio, smile, head turn; blended with Claude's read</td><td>Same idea with MediaPipe Face Landmarker blendshapes or InsightFace on device</td></tr>
+      <tr><td>Composition</td><td>Saliency centroid vs. rule of thirds / center, edge penalty</td><td>Learned composition model (e.g. SAMP-Net style) on the saliency map</td></tr>
+      <tr><td>Aesthetic (IAA)</td><td>Hand-built proxies: color, subject pop</td><td>NIMA / MUSIQ / a CLIP-based aesthetic head, fine-tuned per user</td></tr>
+      <tr><td>Fits your look</td><td>Distance in tone and color statistics to the profile</td><td>Distance to the user's past posts in CLIP / SigLIP space</td></tr>
+      <tr><td>Fits the brief</td><td>Keyword rules (warm, moody, film…)</td><td>Text–image similarity between the brief and each frame</td></tr>
+      <tr><td>Embedding</td><td>16×16 structure + color histogram</td><td>CLIP / DINOv2 embeddings, stored in a vector index</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout">The pairwise ranker is the piece that makes it personal. Every pick, un-pick and “this or that” answer is a labeled pair. Start with the linear model in the prototype, then train a small MLP or LightGBM ranker on the same features once a user has a few hundred pairs.</div>
+
+  <h2>Auto-editing faces and bodies</h2>
+  <p>The prototype matches skin brightness, color and smoothness inside each face. Matching the rest of how someone retouches (eyes, teeth, face shape, body) takes three more pieces:</p>
+  <ul>
+    <li><b>Per-user retouch parameters.</b> Run face landmarks on the past edits, estimate what was applied (skin smoothing strength, eye brightening, slimming warp), and store those as profile parameters.</li>
+    <li><b>Image-adaptive 3D LUTs.</b> Instead of one global LUT, predict a LUT per photo from the profile plus the photo's content. Fast enough for phones.</li>
+    <li><b>Guardrails.</b> Cap warp strength, keep it off by default for body reshaping, and always show before and after. Heavy reshaping draws real criticism with this audience.</li>
+  </ul>
+
+  <h2>Cover data: what's realistic</h2>
+  <p>Scraping Instagram, TikTok, Douyin or Xiaohongshu at scale breaks their terms of service and invites blocking and legal risk. The more defensible data plan, which also produces better personal models:</p>
+  <ol>
+    <li><b>Start from priors.</b> Public creator guidance and research on thumbnails: faces and eye contact, contrast at small sizes, clean space for titles, subjects clear of UI. That's what the prototype's rubric encodes.</li>
+    <li><b>Connect the creator's own accounts.</b> Official APIs: Instagram Graph API insights, TikTok Display API, Douyin Open Platform. Xiaohongshu has limited official access, so start with manual import there. Each posted cover becomes a labeled example with real views and engagement.</li>
+    <li><b>Licensed or opt-in panels.</b> For cross-creator models, use opted-in creators and licensed datasets, then fine-tune per platform.</li>
+    <li><b>Close the loop.</b> Recommend, post, read back views, retrain. The per-platform weights in the prototype become learned models.</li>
+  </ol>
+
+  <h2>Platform specs used</h2>
+  <div class="tbl"><table>
+    <thead><tr><th>Platform</th><th>Cover shape</th><th>UI zones avoided</th><th>Rubric leans on</th></tr></thead>
+    <tbody>
+      <tr><td>Instagram</td><td>4:5 feed / carousel</td><td>Side trim in the 3:4 profile grid</td><td>Polish, grid cohesion with your look</td></tr>
+      <tr><td>TikTok</td><td>9:16</td><td>Top ~12%, bottom ~27% (caption), right ~16% (buttons)</td><td>Big subject, contrast, thumbnail legibility</td></tr>
+      <tr><td>Douyin</td><td>9:16</td><td>Top ~10%, bottom ~30%, right ~18%</td><td>Brightness, saturation, title space</td></tr>
+      <tr><td>Xiaohongshu</td><td>3:4 note cover</td><td>Title strip below the thumbnail</td><td>Bright, airy, clean space for big title text</td></tr>
+    </tbody>
+  </table></div>
+  <p style="color:var(--muted);font-size:14px">Safe-zone percentages are approximate and change with app versions. Keep them in config, not code.</p>
+
+  <h2>Suggested production stack</h2>
+  <ul>
+    <li><b>Client:</b> React Native or SwiftUI for the camera roll, with the web studio for desktop. Do the first cull pass on device (Core ML / TF Lite) so the whole camera roll never has to upload.</li>
+    <li><b>Backend:</b> Python (FastAPI) workers on GPUs for embeddings, IAA, face models and LUT prediction. Postgres + pgvector for profiles and embeddings. Object storage for originals.</li>
+    <li><b>Privacy:</b> Photos of faces are sensitive data. Use explicit consent, regional storage (China needs separate infrastructure for Douyin and Xiaohongshu users), and deletion on request.</li>
+  </ul>
+
+  <h2>Build order</h2>
+  <ol>
+    <li>Ship the cull: clustering, bursts, face check, ranker. It saves the most time.</li>
+    <li>Then auto-edit with LUTs and skin smoothing, plus manual sliders.</li>
+    <li>Then covers on priors, with account connections feeding real view data.</li>
+    <li>Then per-photo LUTs, retouch parameters and learned cover models once the data exists.</li>
+  </ol>
+</div>
+</body>
+</html>

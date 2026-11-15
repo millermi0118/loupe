@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+*.log
+# never commit real photos or keys
+photos/
+*.heic
+.env
