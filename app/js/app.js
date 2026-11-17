@@ -30,6 +30,7 @@ const S = {
   shots: [], scenes: [], picks: [], locked: new Set(), banned: new Set(), inspect: null, sampleShots: false, culled: false,
   adj: {}, active: null, split: 0.5, safe: true, coverChoice: {}, editedCache: {}, busy: null,
   sample: null, sampleImages: null, useClaude: true, judging: null,
+  server: null, // Loupe backend limits when /api/health answers (local prototype); judging then goes through it
 };
 
 const area = (b) => (b[2] - b[0]) * (b[3] - b[1]);
@@ -57,6 +58,16 @@ capability('sample').then(async (s) => {
   S.sampleImages = lim?.images || null;
   if (S.step === 'pick') render();
 });
+// The Loupe backend (server/), when this page is served by it. Holds the Anthropic key server-side.
+(async () => {
+  try {
+    const r = await fetch('/api/health', { cache: 'no-store', signal: AbortSignal.timeout(3000) });
+    const h = r.ok && /json/.test(r.headers.get('content-type') || '') ? await r.json() : null;
+    if (h?.ok && h.judge && h.limits) { S.server = h.limits; if (S.step === 'pick' || S.step === 'brief') render(); }
+  } catch (e) { /* no backend: artifact or static hosting */ }
+})();
+// Claude judging is available through the backend (preferred) or the artifact's sample capability.
+const canJudge = () => !!(S.server || (S.sample && S.sampleImages));
 
 /* ---------------- ingest ---------------- */
 
@@ -367,8 +378,8 @@ function renderBrief(app) {
       </div>
       <aside class="side">
         <div class="panel stack">
-          ${S.sampleImages ? `<label class="row" style="font-weight:600"><input type="checkbox" id="useClaude" ${S.useClaude ? 'checked' : ''}> Let Claude judge faces and your taste</label>
-            <p class="note">Claude sees small thumbnails of the shoot next to 3 of your past edits and rates each frame on how likely you'd post it, plus eyes, expression and angle. It asks permission the first time.</p>`
+          ${canJudge() ? `<label class="row" style="font-weight:600"><input type="checkbox" id="useClaude" ${S.useClaude ? 'checked' : ''}> Let Claude judge faces and your taste</label>
+            <p class="note">Claude sees small thumbnails of the shoot next to 3 of your past edits and rates each frame on how likely you'd post it, plus eyes, expression and angle. ${S.server ? 'Thumbnails go through the Loupe server to the Anthropic API.' : 'It asks permission the first time.'}</p>`
           : '<p class="note">Here, taste is estimated from how similar each frame is to your past posts. On the published page, Claude can also judge expressions and your taste from examples.</p>'}
           <h2>What happens next</h2>
           <dl class="kv">
@@ -415,7 +426,7 @@ function renderPick(app) {
       </div>
       <div class="row"><span id="busy" class="busy" hidden></span>
         <button class="btn" data-act="duel">This or that</button>
-        ${S.sampleImages ? (S.judging ? '<button class="btn" data-act="stopJudge">Stop Claude</button>' : `<button class="btn" data-act="faces">${S.shots.some((x) => x.judge) ? 'Re-judge' : 'Judge'} with Claude</button>`) : ''}
+        ${canJudge() ? (S.judging ? '<button class="btn" data-act="stopJudge">Stop Claude</button>' : `<button class="btn" data-act="faces">${S.shots.some((x) => x.judge) ? 'Re-judge' : 'Judge'} with Claude</button>`) : ''}
         <button class="btn hot" data-go="edit">Edit picks →</button></div>
     </div>
     <div class="grid2">
@@ -584,7 +595,8 @@ async function findRefFaces(signal) {
 
 function applyJudgments(batch, res) {
   (Array.isArray(res) ? res : []).forEach((r, i) => {
-    const s = batch[(r.photo | 0) - 1] || batch[i];
+    // backend results carry the frame id; artifact results carry the photo number
+    const s = r.id != null ? batch.find((b) => b.id === r.id) : batch[(r.photo | 0) - 1] || batch[i];
     if (!s) return;
     const boxes = validBoxes(r.faces);
     const eyes = clamp01(r.eyes_open), ex = clamp01(r.expression), an = clamp01(r.angle);
@@ -593,11 +605,33 @@ function applyJudgments(batch, res) {
   });
 }
 
+async function toBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// One batch through the Loupe backend. Sends only the small JPEG thumbnails (480px), never originals.
+async function serverSelect(refs, batch, signal) {
+  const body = {
+    brief: S.brief.slice(0, 500),
+    references: await Promise.all(refs.map(async (r, i) => ({ id: `ref-${i + 1}`, data: await toBase64(r.thumb) }))),
+    candidates: await Promise.all(batch.map(async (b) => ({ id: b.id, data: await toBase64(b.thumb) }))),
+  };
+  const r = await fetch('/api/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
+  const out = await r.json().catch(() => null);
+  if (!r.ok) { const e = new Error(out?.error?.message || `Server error ${r.status}`); e.code = out?.error?.code; throw e; }
+  return out;
+}
+
 async function judgeWithClaude() {
-  if (!S.sample || !S.sampleImages || S.judging) return;
-  const per = Math.max(4, Math.min(S.sampleImages.maxCount || 8, 16));
-  const refs = spread(S.refs, Math.min(3, per - 3));
-  const perBatch = per - refs.length;
+  if (!canJudge() || S.judging) return;
+  const viaServer = !!S.server;
+  const per = viaServer ? Math.min(16, S.server.maxReferences + S.server.maxCandidates) : Math.max(4, Math.min(S.sampleImages.maxCount || 8, 16));
+  const refs = spread(S.refs, Math.min(3, per - 3, viaServer ? S.server.maxReferences : 3));
+  const perBatch = viaServer ? Math.min(S.server.maxCandidates, per - refs.length) : per - refs.length;
+  const tokens = { input: 0, output: 0 };
   // judge everything that could make the cut, with whole bursts so a blink can lose to its sibling
   const ranked = S.shots.filter((s) => !s.dupOf).sort((a, b) => b.score - a.score);
   const bursts = new Set(ranked.slice(0, Math.max(24, S.target * 3)).map((s) => s.burst));
@@ -606,14 +640,23 @@ async function judgeWithClaude() {
   S.judging = ctrl;
   render();
   let done = 0, failed = null;
-  try { await findRefFaces(ctrl.signal); } catch (e) { failed = e; }
+  // the backend uses the in-browser face detector for past edits; only the artifact asks Claude for those boxes
+  if (!viaServer) { try { await findRefFaces(ctrl.signal); } catch (e) { failed = e; } }
   for (let i = 0; i < pool.length && !ctrl.signal.aborted && !failed; i += perBatch) {
     const batch = pool.slice(i, i + perBatch);
     setBusy(`Claude has judged ${done} of ${pool.length} frames…`);
     try {
-      const res = await S.sample.json(judgePrompt(refs.length, batch.length), {
-        images: [...refs.map((r) => r.thumb), ...batch.map((b) => b.thumb)], modelTier: 'default', signal: ctrl.signal,
-      });
+      let res;
+      if (viaServer) {
+        const out = await serverSelect(refs, batch, ctrl.signal);
+        res = out.results;
+        tokens.input += out.usage?.input_tokens || 0;
+        tokens.output += out.usage?.output_tokens || 0;
+      } else {
+        res = await S.sample.json(judgePrompt(refs.length, batch.length), {
+          images: [...refs.map((r) => r.thumb), ...batch.map((b) => b.thumb)], modelTier: 'default', signal: ctrl.signal,
+        });
+      }
       applyJudgments(batch, res);
       done += batch.length;
       rescore();
@@ -623,7 +666,8 @@ async function judgeWithClaude() {
   S.editedCache = {}; // face boxes may have changed
   setBusy(null);
   if (failed && !ctrl.signal.aborted) toast(failed.code === 'not_granted' ? 'Claude access was declined, so picks use local scores only.' : `Claude couldn't finish judging: ${failed.message || failed.code}`);
-  else if (done) toast(`Claude judged ${done} frames against your past posts. Picks updated.`);
+  else if (done) toast(`Claude judged ${done} frames against your past posts. Picks updated.${tokens.input ? ` (${(tokens.input / 1000).toFixed(1)}k tokens in, ${(tokens.output / 1000).toFixed(1)}k out)` : ''}`);
+  if (tokens.input) S.lastUsage = tokens;
   rescore();
   render();
 }
@@ -697,7 +741,7 @@ async function previewSource(s, side = 1200) {
 let editTimer = 0, lastAfter = null, lastBefore = null, lastFaces = [];
 
 function faceStatus(face) {
-  if (!face.boxes.length) return 'No face found in this photo, so Match my look leaves it unchanged.' + (S.sampleImages ? ' Judging with Claude finds faces more reliably.' : '');
+  if (!face.boxes.length) return 'No face found in this photo, so Match my look leaves it unchanged.' + (canJudge() ? ' Judging with Claude finds faces more reliably.' : '');
   if (!S.profile?.face?.n) return 'Face found, but none of your past edits had a detectable face yet. Add a few where your face is visible.';
   if (!face.stats) return 'Face found, but too little visible skin to measure.';
   const p = face.plan, sg = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
@@ -1114,7 +1158,7 @@ document.addEventListener('click', async (e) => {
     case 'resetTaste': S.weights = { ...DEFAULT_WEIGHTS }; S.duels = 0; saveTaste(); if (S.culled) rescore(); render(); break;
     case 'sampleShoot': await loadSampleShoot(); render(); break;
     case 'clearShots': S.shots = []; S.sampleShots = false; S.culled = false; S.picks = []; render(); break;
-    case 'cull': cull(); go('pick'); if (S.useClaude && S.sampleImages) judgeWithClaude(); break;
+    case 'cull': cull(); go('pick'); if (S.useClaude && canJudge()) judgeWithClaude(); break;
     case 'inspect': S.inspect = id; render(); break;
     case 'toggle': togglePick(id); break;
     case 'duel': openDuel(); break;
