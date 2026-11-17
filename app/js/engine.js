@@ -1,6 +1,7 @@
 // Culling engine: style profile, direction parsing, metadata clustering,
 // burst detection, scoring, the pairwise taste ranker and diverse selection.
 import { cosine } from './analyze.js';
+import { shapeProfile } from './shape.js';
 
 /* ---------------- style profile ---------------- */
 
@@ -26,12 +27,14 @@ export function buildProfile(refs) {
   };
 }
 
-// What the creator's retouched faces look like: skin brightness, color and smoothness.
+// What the creator's retouched faces look like: skin brightness, color and smoothness,
+// plus face proportions (feature sizes relative to the face) from the landmarks.
 export function faceProfile(refs) {
   const f = refs.map((r) => r.skin).filter(Boolean);
-  if (!f.length) return null;
+  const shape = shapeProfile(refs.map((r) => r.shape));
+  if (!f.length && !shape) return null;
   const avg = (k) => f.reduce((s, x) => s + x[k], 0) / f.length;
-  return { n: f.length, L: avg('L'), a: avg('a'), b: avg('b'), tex: avg('tex') };
+  return f.length ? { n: f.length, L: avg('L'), a: avg('a'), b: avg('b'), tex: avg('tex'), shape } : { n: 0, shape };
 }
 
 function dedupePalette(pal) {

@@ -2,17 +2,25 @@
 // smoothness of the creator's past edits. The rest of the photo keeps its tone unless the
 // manual sliders change it (baked into a 3D LUT).
 import { rgbToLab, rgbToLabF, labToRgb, isSkin, expandBox } from './analyze.js';
+import { warpImage, toPx, SHAPE_KEYS } from './shape.js';
 
 export const ADJUST = [
-  { key: 'match', label: 'Match my look (faces)', min: 0, max: 1, step: 0.01, def: 0.8 },
-  { key: 'skin', label: 'Extra smoothing', min: 0, max: 1, step: 0.01, def: 0 },
-  { key: 'exposure', label: 'Exposure', min: -1, max: 1, step: 0.01, def: 0 },
-  { key: 'contrast', label: 'Contrast', min: -1, max: 1, step: 0.01, def: 0 },
-  { key: 'warmth', label: 'Warmth', min: -1, max: 1, step: 0.01, def: 0 },
-  { key: 'tint', label: 'Tint', min: -1, max: 1, step: 0.01, def: 0 },
-  { key: 'sat', label: 'Saturation', min: -1, max: 1, step: 0.01, def: 0 },
-  { key: 'fade', label: 'Fade', min: 0, max: 1, step: 0.01, def: 0 },
-  { key: 'grain', label: 'Grain', min: 0, max: 1, step: 0.01, def: 0 },
+  { key: 'match', label: 'Match my skin', min: 0, max: 1, step: 0.01, def: 0.8, group: 'match' },
+  { key: 'shapeMatch', label: 'Match my proportions', min: 0, max: 1, step: 0.01, def: 0.7, group: 'match' },
+  { key: 'slim', label: 'Slim face', min: -1, max: 1, step: 0.01, def: 0, group: 'shape' },
+  { key: 'jaw', label: 'V-line jaw', min: -1, max: 1, step: 0.01, def: 0, group: 'shape' },
+  { key: 'chin', label: 'Chin length', min: -1, max: 1, step: 0.01, def: 0, group: 'shape' },
+  { key: 'eyes', label: 'Eye size', min: -1, max: 1, step: 0.01, def: 0, group: 'shape' },
+  { key: 'nose', label: 'Nose size', min: -1, max: 1, step: 0.01, def: 0, group: 'shape' },
+  { key: 'lips', label: 'Lip size', min: -1, max: 1, step: 0.01, def: 0, group: 'shape' },
+  { key: 'skin', label: 'Extra smoothing', min: 0, max: 1, step: 0.01, def: 0, group: 'photo' },
+  { key: 'exposure', label: 'Exposure', min: -1, max: 1, step: 0.01, def: 0, group: 'photo' },
+  { key: 'contrast', label: 'Contrast', min: -1, max: 1, step: 0.01, def: 0, group: 'photo' },
+  { key: 'warmth', label: 'Warmth', min: -1, max: 1, step: 0.01, def: 0, group: 'photo' },
+  { key: 'tint', label: 'Tint', min: -1, max: 1, step: 0.01, def: 0, group: 'photo' },
+  { key: 'sat', label: 'Saturation', min: -1, max: 1, step: 0.01, def: 0, group: 'photo' },
+  { key: 'fade', label: 'Fade', min: 0, max: 1, step: 0.01, def: 0, group: 'photo' },
+  { key: 'grain', label: 'Grain', min: 0, max: 1, step: 0.01, def: 0, group: 'photo' },
 ];
 
 export function defaultAdjust() {
@@ -152,13 +160,21 @@ export function addGrain(img, amount) {
   }
 }
 
-// face = { boxes, plan } from the app; boxes are normalized, so any resolution works.
+// Manual reshape sliders on top of the auto match toward the creator's proportions.
+export function shapeAmounts(adj, auto) {
+  const out = {};
+  for (const k of SHAPE_KEYS) out[k] = Math.max(-1, Math.min(1, (adj[k] || 0) + (auto ? auto[k] * adj.shapeMatch : 0)));
+  return out;
+}
+
+// face = { boxes, plan, warp } from the app; boxes and landmarks are normalized, so any resolution works.
 export function renderEdit(srcCanvas, adj, face) {
   const c = document.createElement('canvas');
   c.width = srcCanvas.width; c.height = srcCanvas.height;
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(srcCanvas, 0, 0);
   const img = ctx.getImageData(0, 0, c.width, c.height);
+  if (face?.warp) warpImage(img, toPx(face.warp.pts, c.width, c.height), face.warp.amounts);
   faceRetouch(img, face?.boxes, face?.plan);
   if (GLOBAL_KEYS.some((k) => adj[k])) applyLUT(img, buildLUT(makeTransform(adj), 25));
   addGrain(img, adj.grain);

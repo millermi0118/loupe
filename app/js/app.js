@@ -6,7 +6,8 @@ import {
   buildProfile, profileStrength, describeProfile, parseDirection, clusterScenes, findBursts,
   scoreShots, selectPicks, reasonsFor, updateWeights, nextPair, FEATURES, DEFAULT_WEIGHTS, styleMatch, learnFromOverride,
 } from './engine.js';
-import { ADJUST, defaultAdjust, renderEdit, facePlan } from './edit.js';
+import { ADJUST, defaultAdjust, renderEdit, facePlan, shapeAmounts } from './edit.js';
+import { measureShape, solveShape, toPx, buildOps, forwardPts } from './shape.js';
 import { PLATFORMS, rankCovers, FACTOR_COPY } from './covers.js';
 import { sampleReferences, sampleShoot } from './demo.js';
 
@@ -31,6 +32,19 @@ const S = {
   sample: null, sampleImages: null, useClaude: true, judging: null,
 };
 
+const area = (b) => (b[2] - b[0]) * (b[3] - b[1]);
+const mainFaceObj = (faces) => (faces?.length ? faces.reduce((a, b) => (area(b.box) > area(a.box) ? b : a)) : null);
+const shapeOf = (faces, W, H) => { const f = mainFaceObj(faces); return f?.pts ? measureShape(toPx(f.pts, W, H)) : null; };
+
+// Sample photos carry their true landmarks: attach them to the detected face (or stand in for it).
+function withKnownFace(faces, pts, isRef) {
+  const f = mainFaceObj(faces);
+  if (f) { f.pts = pts; return faces; }
+  if (faces?.length === 0 && !isRef) return faces; // detector ran and saw no usable face (a blink): keep that
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  const brow = Math.min(...ys.slice(17, 27)), chin = Math.max(...ys.slice(0, 17));
+  return [{ box: [Math.min(...xs), brow - 0.3 * (chin - brow), Math.max(...xs), chin], eyeY: (pts[37][1] + pts[44][1]) / 2, eyesOpen: 1, smile: 0.5, yaw: 0, conf: 1, pts }];
+}
 const mainFace = (boxes) => boxes.slice().sort((a, b) => (b[2] - b[0]) * (b[3] - b[1]) - (a[2] - a[0]) * (a[3] - a[1]))[0] || null;
 let uid = 0;
 window.loupe = S; // handy for poking at state from devtools
@@ -53,14 +67,16 @@ async function ingest(blob, name, extra = {}) {
   const feat = analyzeCanvas(scaledCanvas(mid, 400));
   let faces = null;
   try { faces = await detectFaces(scaledCanvas(bmp, 640)); } catch (e) { faces = null; }
+  if (extra.facePts) faces = withKnownFace(faces, extra.facePts, !!extra.ref);
   const main = faces ? mainFace(faces.map((f) => f.box)) : feat.faceBox;
   const skin = skinStats(bmp, main);
   const origW = bmp.width, origH = bmp.height;
+  const shape = shapeOf(faces, origW, origH);
   if (bmp.close) bmp.close();
   const thumb = await canvasBlob(mid, 'image/jpeg', 0.84);
   const small = extra.ref ? scaledCanvas(mid, 320).toDataURL('image/jpeg', 0.8) : null;
   return {
-    id: extra.ref ? 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7) : 'p' + ++uid, small, name, blob, feat, faces, faceChecked: faces !== null, skin, origW, origH, thumb, url: URL.createObjectURL(thumb), exif,
+    id: extra.ref ? 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7) : 'p' + ++uid, small, name, blob, feat, faces, faceChecked: faces !== null, skin, shape, shapeChecked: faces !== null, origW, origH, thumb, url: URL.createObjectURL(thumb), exif,
     time: extra.time ?? exif.time ?? null,
     gps: exif.lat != null ? { lat: exif.lat, lon: exif.lon } : null,
   };
@@ -261,9 +277,10 @@ function renderLook(app) {
           <div class="note mono">${n} photo${n === 1 ? '' : 's'} · ${pct(st.value)}% confident</div>
           ${p ? `
             <div class="stack" style="gap:8px"><div class="eyebrow">Face look · used by Match my look</div>
-              ${p.face ? `<div class="row"><i style="width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:rgb(${labToRgb(p.face.L, p.face.a, p.face.b).map((v) => v | 0).join(',')})"></i>
+              ${p.face?.n ? `<div class="row"><i style="width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:rgb(${labToRgb(p.face.L, p.face.a, p.face.b).map((v) => v | 0).join(',')})"></i>
                 <div class="note">${p.face.tex < 0.8 ? 'Heavily smoothed skin' : p.face.tex < 1.6 ? 'Smoothed skin' : 'Natural skin texture'} · ${p.face.b > 18 ? 'warm' : p.face.b < 10 ? 'cool' : 'neutral'} tone · learned from ${p.face.n} photo${p.face.n > 1 ? 's' : ''} with a face</div></div>`
-              : '<p class="note">No faces found in your past edits yet. Match my look needs a few photos where your face is clearly visible.</p>'}</div>
+              : '<p class="note">No faces found in your past edits yet. Match my look needs a few photos where your face is clearly visible.</p>'}
+              ${p.face?.shape ? proportionsHTML(p.face.shape) : ''}</div>
             <div class="eyebrow">Overall style · used for picking</div>
             <div class="swatches">${p.palette.map((c) => `<i style="background:rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})"></i>`).join('')}</div>
             <div class="chips">${describeProfile(p).map((t) => `<span class="chip">${t}</span>`).join('')}</div>
@@ -627,7 +644,42 @@ function faceFor(s, src) {
   const boxes = facesOf(s);
   const key = JSON.stringify(boxes);
   if (s.faceKey !== key) { s.faceKey = key; s.faceStats = boxes.length ? skinStats(src, mainFace(boxes)) : null; }
-  return { boxes, stats: s.faceStats, plan: facePlan(S.profile?.face, s.faceStats, adjFor(s.id)) };
+  const a = adjFor(s.id);
+  const plan = facePlan(S.profile?.face?.n ? S.profile.face : null, s.faceStats, a);
+  // reshape: main face only, from its landmarks. Auto amounts move its proportions toward the profile's.
+  const f = mainFaceObj(s.faces);
+  if (!f?.pts) return { boxes, stats: s.faceStats, plan, warp: null };
+  const target = S.profile?.face?.shape || null;
+  const tkey = target ? JSON.stringify(target) : '';
+  if (s.shapeKey !== tkey) { s.shapeKey = tkey; s.shapeAuto = target ? solveShape(toPx(f.pts, s.origW, s.origH), target) : null; }
+  return { boxes, stats: s.faceStats, plan, warp: { pts: f.pts, amounts: shapeAmounts(a, s.shapeAuto) }, auto: s.shapeAuto };
+}
+
+const PROPS = [
+  ['eye', 'Eyes', 'width ÷ face width'], ['nose', 'Nose', 'width ÷ face width'],
+  ['width', 'Face', 'cheek width ÷ height'], ['jaw', 'Jaw', 'lower ÷ cheek width'], ['chin', 'Lower face', 'nose-to-chin ÷ face height'],
+];
+const fmtProp = (k, v) => (k === 'width' || k === 'jaw' ? v.toFixed(2) : Math.round(v * 100) + '%');
+
+function proportionsHTML(sh) {
+  return `<div class="eyebrow" style="margin-top:6px">Face proportions · used by Match my proportions</div>
+    <dl class="kv mono props">${PROPS.map(([k, label, how]) => `<dt>${label} <small>${how}</small></dt><dd>${fmtProp(k, sh.show[k])}</dd>`).join('')}</dl>
+    <div class="note">Median of ${sh.n} past edit${sh.n > 1 ? 's' : ''} with a front-facing face.</div>`;
+}
+
+// This photo's proportions, after the edit, and the creator's typical ones.
+function shapeStatus(s, face) {
+  if (!face.warp) return '<p class="note">Face shape tools need the face landmarks, which weren\'t found in this photo.</p>';
+  const P = toPx(face.warp.pts, s.origW, s.origH);
+  const before = measureShape(P), after = measureShape(forwardPts(P, buildOps(P, face.warp.amounts)));
+  const target = S.profile?.face?.shape;
+  const turned = Math.abs(before.yaw) > 0.3;
+  return `<table class="props-table mono"><thead><tr><th></th><th>Photo</th><th>Edited</th><th>Your look</th></tr></thead><tbody>
+    ${PROPS.map(([k, label]) => `<tr><th>${label}</th><td>${fmtProp(k, before.show[k])}</td><td>${fmtProp(k, after.show[k])}</td><td>${target ? fmtProp(k, target.show[k]) : '–'}</td></tr>`).join('')}
+    </tbody></table>
+    <p class="note">${!target ? 'None of your past edits had a clear front-facing face yet, so only the manual shape sliders apply.'
+      : turned ? 'Head is turned, so proportions can\'t be compared fairly. Auto-match is off for this photo; manual sliders still work.'
+      : `Proportions are nudged toward the median of ${target.n} past edit${target.n > 1 ? 's' : ''}, capped to stay subtle. Main face only.`}</p>`;
 }
 const previewCache = new Map();
 
@@ -646,7 +698,7 @@ let editTimer = 0, lastAfter = null, lastBefore = null, lastFaces = [];
 
 function faceStatus(face) {
   if (!face.boxes.length) return 'No face found in this photo, so Match my look leaves it unchanged.' + (S.sampleImages ? ' Judging with Claude finds faces more reliably.' : '');
-  if (!S.profile?.face) return 'Face found, but none of your past edits had a detectable face yet. Add a few where your face is visible.';
+  if (!S.profile?.face?.n) return 'Face found, but none of your past edits had a detectable face yet. Add a few where your face is visible.';
   if (!face.stats) return 'Face found, but too little visible skin to measure.';
   const p = face.plan, sg = (v) => (v >= 0 ? '+' : '') + v.toFixed(1);
   return `Face: brightness ${sg(p.dL)} · warmth ${sg(p.db)} · rosiness ${sg(p.da)} · ${Math.round(p.smooth * 100)}% smoothing, matched to ${S.profile.face.n} past edit${S.profile.face.n > 1 ? 's' : ''}.`;
@@ -662,7 +714,7 @@ function renderEdit_(app) {
       <div>
         <div class="eyebrow">Step 4 · Auto-edit</div>
         <h1>Faces edited to <em>your look</em></h1>
-        <p class="lede">Match my look only touches faces: skin brightness, color and smoothness move toward how you retouched your past photos. The rest of each photo keeps its original tone unless you change it with the sliders. Drag the divider to compare.</p>
+        <p class="lede">Match my look only touches faces: skin brightness, color and smoothness, and face proportions like eye, nose and face size, move toward how you retouched your past photos. The rest of each photo keeps its original tone unless you change it with the sliders. Drag the divider to compare, or enlarge to check the detail.</p>
       </div>
       <div class="row"><span id="busy" class="busy" hidden></span>
         <button class="btn" data-act="exportAll">Export all</button>
@@ -671,16 +723,25 @@ function renderEdit_(app) {
     <div class="editor">
       <div class="reel">${S.picks.map((p) => `<button data-act="active" data-id="${p.id}" aria-pressed="${p.id === s.id}"><img src="${p.url}" alt="${esc(p.name)}"></button>`).join('')}</div>
       <div class="stage"><span class="lbl" style="left:24px">BEFORE</span><span class="lbl" style="right:24px">AFTER</span>
-        <div class="compare" id="compare"><canvas id="view" width="10" height="10"></canvas></div></div>
+        <div class="compare" id="compare"><canvas id="view" width="10" height="10"></canvas></div>
+        <button class="zoom-btn" data-act="zoom" aria-label="Enlarge photo to see detail">⤢ Enlarge</button></div>
       <div class="panel stack">
         <div class="row" style="justify-content:space-between"><h2>${esc(s.name)}</h2><span class="note mono">${S.profile ? `profile · ${S.profile.n} refs` : 'no profile yet'}</span></div>
-        <p class="note" id="faceStatus">Reading the face…</p>
-        <label class="row" style="font-size:13px;font-weight:600"><input type="checkbox" id="showFaces" ${S.showFaces ? 'checked' : ''}> Outline detected faces</label>
-        <div class="sliders">${ADJUST.map((d) => `
-          <div class="slider ${d.key === 'match' ? 'key' : ''}"><label for="adj-${d.key}">${d.label}<span id="v-${d.key}">${fmtAdj(d, a[d.key])}</span></label>
-          <input type="range" id="adj-${d.key}" data-adj="${d.key}" min="${d.min}" max="${d.max}" step="${d.step}" value="${a[d.key]}"></div>`).join('')}
-          <label class="row" style="font-size:13px;font-weight:600"><input type="checkbox" id="adj-mono" ${a.mono ? 'checked' : ''}> Black & white</label>
-        </div>
+        <section class="esec">
+          <div class="eyebrow">Match my look</div>
+          <div class="sliders">${ADJUST.filter((d) => d.group === 'match').map((d) => sliderHTML(d, a)).join('')}</div>
+          <p class="note" id="faceStatus">Reading the face…</p>
+          <div id="shapeStatus"></div>
+          <label class="row" style="font-size:13px;font-weight:600"><input type="checkbox" id="showFaces" ${S.showFaces ? 'checked' : ''}> Outline detected faces</label>
+        </section>
+        <details class="esec" open><summary class="eyebrow">Face shape</summary>
+          <p class="note">Adds to Match my proportions. Applies to the main face.</p>
+          <div class="sliders">${ADJUST.filter((d) => d.group === 'shape').map((d) => sliderHTML(d, a)).join('')}</div>
+        </details>
+        <details class="esec" open><summary class="eyebrow">Skin &amp; photo</summary>
+          <div class="sliders">${ADJUST.filter((d) => d.group === 'photo').map((d) => sliderHTML(d, a)).join('')}
+            <label class="row" style="font-size:13px;font-weight:600"><input type="checkbox" id="adj-mono" ${a.mono ? 'checked' : ''}> Black & white</label></div>
+        </details>
         <div class="row">
           <button class="btn sm" data-act="resetAdj">Reset</button>
           <button class="btn sm" data-act="applyAll">Apply to all picks</button>
@@ -705,6 +766,10 @@ function renderEdit_(app) {
   scheduleEdit(s, 0);
 }
 
+const sliderHTML = (d, a) => `
+  <div class="slider ${d.group === 'match' ? 'key' : ''}"><label for="adj-${d.key}">${d.label}<span id="v-${d.key}">${fmtAdj(d, a[d.key])}</span></label>
+  <input type="range" id="adj-${d.key}" data-adj="${d.key}" min="${d.min}" max="${d.max}" step="${d.step}" value="${a[d.key]}"></div>`;
+
 function fmtAdj(d, v) {
   if (d.min === 0) return `${Math.round(v * 100)}%`;
   return `${v > 0 ? '+' : ''}${Math.round(v * 100)}`;
@@ -721,6 +786,8 @@ function scheduleEdit(s, delay = 70) {
     lastFaces = face.boxes;
     const st = $('#faceStatus');
     if (st) st.textContent = faceStatus(face);
+    const ss = $('#shapeStatus');
+    if (ss) ss.innerHTML = shapeStatus(s, face);
     compose();
   }, delay);
 }
@@ -760,7 +827,134 @@ function wireCompare() {
   el.addEventListener('pointerdown', (e) => { drag = true; el.setPointerCapture(e.pointerId); move(e); });
   el.addEventListener('pointermove', (e) => drag && move(e));
   el.addEventListener('pointerup', () => (drag = false));
+  el.addEventListener('dblclick', () => openZoom(byId(S.active)));
 }
+
+/* ---- enlarge: full-screen viewer with zoom + pan, before / after / split ---- */
+
+let zoomKeys = null, zoomToken = null;
+
+async function openZoom(s) {
+  if (!s || !lastAfter) return;
+  const layer = $('#layer');
+  layer.innerHTML = `<div class="zoomer" role="dialog" aria-modal="true" aria-label="Enlarged photo">
+    <div class="zbar">
+      <strong class="zname">${esc(s.name)}</strong>
+      <div class="seg" role="group" aria-label="Show">
+        <button data-zmode="after" aria-pressed="true">After</button><button data-zmode="before" aria-pressed="false">Before</button><button data-zmode="split" aria-pressed="false">Split</button></div>
+      <input type="range" id="zsplit" min="0" max="1" step="0.01" value="${S.split}" aria-label="Split position" hidden>
+      <div class="seg"><button data-z="out" aria-label="Zoom out">−</button><span class="zpct mono" id="zpct">Fit</span><button data-z="in" aria-label="Zoom in">+</button></div>
+      <button class="btn sm" data-z="fit">Fit</button>
+      <button class="btn sm" data-z="face">Face</button>
+      <span class="busy" id="zbusy">Rendering full detail…</span>
+      <button class="btn sm primary zclose" data-z="close" aria-label="Close enlarged view">Done</button>
+    </div>
+    <div class="zview" id="zview"><canvas id="zc"></canvas></div>
+    <div class="zhint note">Scroll or pinch to zoom · drag to move · double-click to zoom in · hold B for before · Esc to close</div>
+  </div>`;
+  const token = (zoomToken = {});
+  const view = $('#zview'), cv = $('#zc'), ctx = cv.getContext('2d');
+  const V = { mode: 'after', peek: false, z: 1, tx: 0, ty: 0, fit: 1, after: lastAfter, before: lastBefore };
+  const draw = () => {
+    const { after, before } = V, w = after.width, h = after.height;
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+    const mode = V.peek ? 'before' : V.mode;
+    ctx.drawImage(mode === 'before' ? before : after, 0, 0, w, h);
+    if (mode === 'split') {
+      const x = Math.round(w * S.split);
+      ctx.drawImage(before, 0, 0, before.width * S.split, before.height, 0, 0, x, h);
+      ctx.fillStyle = '#fff'; ctx.fillRect(x - Math.max(1, w / 1200), 0, Math.max(2, w / 600), h);
+    }
+  };
+  const apply = () => {
+    const vw = view.clientWidth, vh = view.clientHeight, w = cv.width * V.z, h = cv.height * V.z;
+    V.tx = w <= vw ? (vw - w) / 2 : Math.min(0, Math.max(vw - w, V.tx));
+    V.ty = h <= vh ? (vh - h) / 2 : Math.min(0, Math.max(vh - h, V.ty));
+    cv.style.transform = `translate(${V.tx}px, ${V.ty}px) scale(${V.z})`;
+    cv.classList.toggle('px', V.z * devicePixelRatio > 2.5); // show real pixels when far in
+    $('#zpct').textContent = V.z <= V.fit * 1.01 ? 'Fit' : Math.round((V.z / V.fit) * 100) + '%';
+  };
+  const fit = () => {
+    V.fit = Math.min(view.clientWidth / cv.width, view.clientHeight / cv.height);
+    V.z = V.fit; apply();
+  };
+  const zoomAt = (factor, cx = view.clientWidth / 2, cy = view.clientHeight / 2) => {
+    const z = Math.max(V.fit, Math.min(V.fit * 16, V.z * factor));
+    V.tx = cx - ((cx - V.tx) * z) / V.z; V.ty = cy - ((cy - V.ty) * z) / V.z; V.z = z;
+    apply();
+  };
+  const toFace = () => {
+    const b = mainFace(facesOf(s));
+    if (!b) { toast('No face found to zoom to.'); return; }
+    const fw = (b[2] - b[0]) * cv.width, fh = (b[3] - b[1]) * cv.height;
+    V.z = Math.max(V.fit, Math.min(V.fit * 16, Math.min(view.clientWidth / fw, view.clientHeight / fh) * 0.6));
+    V.tx = view.clientWidth / 2 - ((b[0] + b[2]) / 2) * cv.width * V.z;
+    V.ty = view.clientHeight / 2 - ((b[1] + b[3]) / 2) * cv.height * V.z;
+    apply();
+  };
+  draw(); fit();
+
+  // pan, pinch, wheel, double-click
+  const pts = new Map();
+  let last = null;
+  const rel = (e) => { const r = view.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  const pinch = () => { const [a, b] = [...pts.values()]; return { d: Math.hypot(a[0] - b[0], a[1] - b[1]), m: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2] }; };
+  view.addEventListener('pointerdown', (e) => { view.setPointerCapture(e.pointerId); pts.set(e.pointerId, rel(e)); last = pts.size === 2 ? pinch() : rel(e); });
+  view.addEventListener('pointermove', (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, rel(e));
+    if (pts.size === 2) {
+      const p = pinch();
+      V.tx += p.m[0] - last.m[0]; V.ty += p.m[1] - last.m[1];
+      zoomAt(p.d / (last.d || p.d), p.m[0], p.m[1]);
+      last = p;
+    } else if (pts.size === 1 && last && !last.m) {
+      const p = rel(e);
+      V.tx += p[0] - last[0]; V.ty += p[1] - last[1]; last = p; apply();
+    }
+  });
+  const up = (e) => { pts.delete(e.pointerId); last = pts.size === 1 ? [...pts.values()][0] : null; };
+  view.addEventListener('pointerup', up);
+  view.addEventListener('pointercancel', up);
+  view.addEventListener('wheel', (e) => { e.preventDefault(); const [x, y] = rel(e); zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0018)), x, y); }, { passive: false });
+  view.addEventListener('dblclick', (e) => { const [x, y] = rel(e); if (V.z > V.fit * 1.05) fit(); else zoomAt(3, x, y); });
+
+  const setMode = (m) => {
+    V.mode = m;
+    layer.querySelectorAll('[data-zmode]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.zmode === m));
+    $('#zsplit').hidden = m !== 'split';
+    draw();
+  };
+  layer.querySelectorAll('[data-zmode]').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.zmode)));
+  $('#zsplit').addEventListener('input', (e) => { S.split = +e.target.value; draw(); });
+  const close = () => { layer.innerHTML = ''; zoomKeys = null; zoomToken = null; window.removeEventListener('resize', onResize); compose(); };
+  layer.querySelectorAll('[data-z]').forEach((b) => b.addEventListener('click', () => {
+    ({ in: () => zoomAt(1.5), out: () => zoomAt(1 / 1.5), fit, face: toFace, close })[b.dataset.z]();
+  }));
+  const onResize = () => { const was = V.z / V.fit; V.fit = Math.min(view.clientWidth / cv.width, view.clientHeight / cv.height); V.z = V.fit * was; apply(); };
+  window.addEventListener('resize', onResize);
+  zoomKeys = (e) => {
+    if (e.type === 'keyup') { if (e.key === 'b' || e.key === 'B') { V.peek = false; draw(); } return; }
+    if (e.key === 'Escape') close();
+    else if (e.key === '+' || e.key === '=') zoomAt(1.5);
+    else if (e.key === '-') zoomAt(1 / 1.5);
+    else if (e.key === '0') fit();
+    else if ((e.key === 'b' || e.key === 'B') && !V.peek) { V.peek = true; draw(); }
+  };
+  layer.querySelector('[data-z="close"]').focus();
+
+  // swap in a sharper render, keeping the same view
+  const src = await previewSource(s, 2400);
+  if (zoomToken !== token) return;
+  const after = renderEdit(src, adjFor(s.id), faceFor(s, src));
+  if (zoomToken !== token) return;
+  const r = V.after.width / after.width;
+  V.after = after; V.before = src; V.z *= r; V.fit *= r;
+  draw(); apply();
+  $('#zbusy').hidden = true;
+}
+document.addEventListener('keydown', (e) => zoomKeys?.(e));
+document.addEventListener('keyup', (e) => zoomKeys?.(e));
 
 async function fullRender(s, side = 4096) {
   const bmp = await decode(s.blob);
@@ -934,6 +1128,7 @@ document.addEventListener('click', async (e) => {
       toast(`Applied to ${S.picks.length} picks`); break;
     }
     case 'exportOne': exportOne(byId(S.active)); break;
+    case 'zoom': openZoom(byId(S.active)); break;
     case 'exportAll': exportAll(); break;
   }
 });
@@ -947,6 +1142,27 @@ async function loadSampleRefs() {
 async function loadSampleShoot() {
   S.shots = await ingestMany(await sampleShoot(), 'Analyzing sample');
   S.sampleShots = true; S.culled = false;
+}
+
+// Profiles saved before proportions existed: measure them from the stored thumbnails, once.
+async function backfillShapes() {
+  const todo = S.refs.filter((r) => !r.shapeChecked && !S.sampleRefs);
+  if (!todo.length) return;
+  let found = 0;
+  for (const r of todo) {
+    try {
+      const bmp = await decode(r.thumb);
+      const faces = await detectFaces(scaledCanvas(bmp, 640));
+      if (faces === null) return; // no face model here; try again next visit
+      r.shape = shapeOf(faces, bmp.width, bmp.height);
+      r.shapeChecked = true;
+      if (r.shape) found++;
+      if (bmp.close) bmp.close();
+      S.vault?.putRef(serializeRef(r)).catch(() => {});
+    } catch (e) { /* skip this one */ }
+  }
+  rebuildProfile();
+  if (found) { if (S.culled) rescore(); render(); }
 }
 
 /* ---------------- boot ---------------- */
@@ -964,6 +1180,7 @@ async function loadSampleShoot() {
     rebuildProfile();
     S.step = 'brief';
     render();
+    backfillShapes();
     return;
   }
   // first visit: open in a working state with a sample profile + sample shoot, already culled

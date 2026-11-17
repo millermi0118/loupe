@@ -56,6 +56,7 @@ export async function detectFaces(canvas) {
       smile: clamp01((dist(p[48], p[54]) / iod - 0.75) / 0.45),
       yaw: (p[30].x - (eyeL.x + eyeR.x) / 2) / iod, // 0 = facing camera
       conf: r.detection.score,
+      pts: p.map((q) => [+(q.x / W).toFixed(5), +(q.y / H).toFixed(5)]), // 68 landmarks, for reshaping + proportions
     };
   });
 }

@@ -6,6 +6,7 @@
 export const MAX_REFS = 150;
 const FEAT_KEYS = ['meanL', 'stdL', 'meanA', 'stdA', 'meanB', 'stdB', 'chroma', 'colorfulness', 'clutter', 'skinFrac', 'comp', 'aspect', 'centroid', 'q', 'palette'];
 const round = (v) => (Array.isArray(v) ? v.map(round) : typeof v === 'number' ? +v.toFixed(4) : v);
+const roundObj = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v && typeof v === 'object' && !Array.isArray(v) ? roundObj(v) : round(v)]));
 
 export function serializeRef(r) {
   const feat = {};
@@ -15,6 +16,8 @@ export function serializeRef(r) {
     id: r.id, name: r.name, addedAt: r.addedAt || Date.now(), thumb: r.small,
     feat, skin: r.skin ? Object.fromEntries(Object.entries(r.skin).map(([k, v]) => [k, round(v)])) : null,
     faceChecked: !!r.faceChecked,
+    shape: r.shape ? roundObj(r.shape) : null, // face proportions, for Match my proportions
+    shapeChecked: !!r.shapeChecked,
   };
 }
 

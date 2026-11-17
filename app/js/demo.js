@@ -70,24 +70,56 @@ function drawPerson(ctx, W, H, sc, v) {
   ctx.lineTo(cx + s * 0.1, cy + s * 0.14); ctx.quadraticCurveTo(cx + s * 0.28, cy + s * 0.2, cx + s * 0.26, H * 1.05); ctx.fill();
   ctx.fillStyle = sc.skin;
   ctx.fillRect(cx - s * 0.035, cy + s * 0.04, s * 0.07, s * 0.12);
-  ctx.beginPath(); ctx.ellipse(cx, cy, s * 0.085, s * 0.11, v.headTilt || 0, 0, 7); ctx.fill();
+  const fw = v.fw ?? 1, eye = v.eye ?? 1, nose = v.nose ?? 1;
+  ctx.beginPath(); ctx.ellipse(cx, cy, s * 0.085 * fw, s * 0.11, v.headTilt || 0, 0, 7); ctx.fill();
+  // nose: soft shadow under the tip
+  ctx.fillStyle = 'rgba(120,60,40,.35)';
+  ctx.beginPath(); ctx.ellipse(cx, cy + s * 0.03, s * 0.012 * nose, s * 0.005, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = sc.skin;
   if (sc.neon) {
     ctx.fillStyle = 'rgba(255,63,164,.35)'; ctx.beginPath(); ctx.ellipse(cx - s * 0.04, cy, s * 0.05, s * 0.1, 0, 0, 7); ctx.fill();
   }
   ctx.fillStyle = sc.hair;
   ctx.beginPath(); ctx.ellipse(cx, cy - s * 0.05, s * 0.095, s * 0.08, 0, Math.PI, 0); ctx.fill();
-  ctx.fillRect(cx - s * 0.095, cy - s * 0.05, s * 0.025, s * 0.16);
-  ctx.fillRect(cx + s * 0.07, cy - s * 0.05, s * 0.025, s * 0.16);
+  ctx.fillRect(cx - s * (0.01 + 0.085 * fw), cy - s * 0.05, s * 0.025, s * 0.16);
+  ctx.fillRect(cx + s * (0.085 * fw - 0.015), cy - s * 0.05, s * 0.025, s * 0.16);
   ctx.strokeStyle = '#2a1712'; ctx.fillStyle = '#1d120e'; ctx.lineWidth = Math.max(1.5, s * 0.008);
   for (const ex of [-0.032, 0.032]) {
     ctx.beginPath();
     if (v.blink) { ctx.moveTo(cx + ex * s - s * 0.014, cy); ctx.quadraticCurveTo(cx + ex * s, cy + s * 0.008, cx + ex * s + s * 0.014, cy); ctx.stroke(); }
-    else { ctx.ellipse(cx + ex * s, cy, s * 0.011, s * 0.009, 0, 0, 7); ctx.fill(); }
+    else { ctx.ellipse(cx + ex * s, cy, s * 0.011 * eye, s * 0.009 * eye, 0, 0, 7); ctx.fill(); }
   }
   ctx.strokeStyle = '#8a3b3b'; ctx.lineWidth = Math.max(1.5, s * 0.01);
   ctx.beginPath();
   const smile = v.smile ?? 0.6;
   ctx.moveTo(cx - s * 0.03, cy + s * 0.05); ctx.quadraticCurveTo(cx, cy + s * (0.05 + 0.03 * smile), cx + s * 0.03, cy + s * 0.05); ctx.stroke();
+}
+
+// The drawn face's true 68 landmarks (normalized), so the sample can show reshaping
+// and proportion matching even where the face model struggles with drawn faces.
+function demoLandmarks(v, W, H) {
+  const s = (v.size || 1) * W, cx = (v.x ?? 0.5) * W, cy = H * (v.y ?? 0.5);
+  const fw = v.fw ?? 1, eye = v.eye ?? 1, nose = v.nose ?? 1, smile = v.smile ?? 0.6;
+  const rx = s * 0.085 * fw, ry = s * 0.11, P = [];
+  for (let j = 0; j <= 16; j++) { const t = Math.PI - (j * Math.PI) / 16; P.push([cx + rx * Math.cos(t), cy + ry * Math.sin(t)]); }
+  for (const ex of [-0.032, 0.032]) for (let k = 0; k < 5; k++) P.push([cx + ex * s + (k - 2) * s * 0.008, cy - s * 0.03 - (k % 4 ? s * 0.004 : 0)]);
+  for (let k = 0; k < 4; k++) P.push([cx, cy - s * 0.005 + k * s * 0.009]);
+  for (let k = 0; k < 5; k++) P.push([cx + (k - 2) * s * 0.006 * nose, cy + s * 0.03]);
+  for (const ex of [-0.032, 0.032]) {
+    const ew = s * 0.011 * eye, eh = s * 0.009 * eye, c = cx + ex * s;
+    P.push([c - ew, cy], [c - ew / 2, cy - eh], [c + ew / 2, cy - eh], [c + ew, cy], [c + ew / 2, cy + eh], [c - ew / 2, cy + eh]);
+  }
+  const mw = s * 0.03, my = cy + s * 0.05, dip = s * 0.03 * smile;
+  const lip = (t, off) => [cx + t * mw, my + dip * (1 - t * t) * 0.5 + off];
+  [-1, -0.6, -0.25, 0, 0.25, 0.6, 1].forEach((t) => P.push(lip(t, -s * 0.004)));
+  [0.6, 0.25, 0, -0.25, -0.6].forEach((t) => P.push(lip(t, s * 0.006)));
+  [-0.8, -0.3, 0, 0.3, 0.8, 0.3, 0, -0.3].forEach((t, k) => P.push(lip(t, k > 4 ? s * 0.002 : k % 4 ? -s * 0.001 : 0)));
+  // same transform as drawScene
+  const cos = Math.cos(v.tilt || 0), sin = Math.sin(v.tilt || 0), z = v.zoom || 1;
+  return P.map(([x, y]) => {
+    const px = (x - W / 2 + (v.pan || 0) * W) * z, py = (y - H / 2) * z;
+    return [+((px * cos - py * sin + W / 2) / W).toFixed(5), +((px * sin + py * cos + H / 2) / H).toFixed(5)];
+  });
 }
 
 function finish(c, v, grade) {
@@ -141,7 +173,9 @@ export async function sampleReferences() {
   const out = [];
   for (let i = 0; i < specs.length; i++) {
     const [k, v] = specs[i];
-    out.push({ blob: await frame(k, { ...v, seed: 100 + i }, 600, 750, LOOK), name: `past-edit-${String(i + 1).padStart(2, '0')}.jpg` });
+    // the creator's edited look: slimmer face, slightly bigger eyes, smaller nose
+    const vv = { fw: 0.9, eye: 1.18, nose: 0.82, ...v, seed: 100 + i };
+    out.push({ blob: await frame(k, vv, 600, 750, LOOK), facePts: demoLandmarks(vv, 600, 750), name: `past-edit-${String(i + 1).padStart(2, '0')}.jpg` });
   }
   return out;
 }
@@ -173,7 +207,8 @@ export async function sampleShoot() {
   const out = [];
   for (let i = 0; i < specs.length; i++) {
     const [k, t, v] = specs[i];
-    out.push({ blob: await frame(k, { ...v, seed: 7 + i * 13 }, 720, 960), name: `IMG_${4810 + i}.jpg`, time: day + t });
+    const vv = { ...v, seed: 7 + i * 13 };
+    out.push({ blob: await frame(k, vv, 720, 960), facePts: v.blink ? null : demoLandmarks(vv, 720, 960), name: `IMG_${4810 + i}.jpg`, time: day + t });
   }
   return out;
 }
