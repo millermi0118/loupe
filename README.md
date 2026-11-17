@@ -28,6 +28,17 @@ Then open http://localhost:5178. The app opens with a sample profile and a sampl
 
 If your browser caches old JavaScript while you edit, hard-reload (Cmd+Shift+R).
 
+### Claude judging locally (Node backend)
+
+To let Claude judge faces and taste when running locally, start the backend instead. It keeps your Anthropic API key on the server and serves the app on the same origin:
+
+```bash
+cd server && npm install && cp .env.example .env   # then add ANTHROPIC_API_KEY to server/.env
+npm start                                          # http://localhost:5179
+```
+
+Details, API contract, tests and what's needed before any public deployment: [`server/README.md`](server/README.md). It is a local prototype, not a production service.
+
 ### What only works inside the Claude artifact
 
 The published artifact gets two extra abilities from claude.ai:
@@ -55,6 +66,9 @@ app/
     exif.js         capture time, camera, GPS
     demo.js         procedurally drawn sample photos
   models/           face detector + landmark weights (JSON)
+server/             local Node backend: POST /api/select judges photos via the Anthropic API
+  src/              config, validation, prompt, judge (SDK call), HTTP server
+  test/             node --test suite (fake Anthropic client, no network)
 ROADMAP.md          ideas and next steps
 ```
 
