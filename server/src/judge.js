@@ -35,7 +35,7 @@ export function createSelector({ client, model, effort, fallbacks, logger, budge
     try {
       response = await client.beta.messages.create(params, { signal });
     } catch (e) {
-      logger?.error({ ...base, status: 'failure', error: e?.constructor?.name, httpStatus: e?.status, ms: Date.now() - t0 });
+      logger?.error({ ...base, status: 'failure', error: e?.constructor?.name, httpStatus: e?.status, upstream: upstreamDetail(e), ms: Date.now() - t0 });
       throw e;
     }
     const u = response.usage || {};
@@ -69,14 +69,26 @@ export function createSelector({ client, model, effort, fallbacks, logger, budge
   };
 }
 
-// Anthropic SDK errors -> responses that don't leak upstream details to the browser.
+// Anthropic's own error type and message (e.g. which request field it rejected). These describe
+// the request shape, never keys or image data; credential-looking strings are masked anyway.
+export function upstreamDetail(e) {
+  const inner = e?.error?.error;
+  const msg = inner?.message || (e instanceof Anthropic.APIError ? e.message : null);
+  if (!msg) return null;
+  return `${inner?.type ? inner.type + ': ' : ''}${String(msg).replace(/sk-ant-[A-Za-z0-9_-]+/g, 'sk-ant-***')}`.slice(0, 300);
+}
+
+// Anthropic SDK errors -> responses that don't leak credentials or internals to the browser.
 export function mapUpstreamError(err) {
   if (err instanceof HttpError) return err;
   if (err instanceof Anthropic.RateLimitError) return new HttpError(429, 'upstream_rate_limited', 'Claude is busy right now. Try again in a minute.');
   if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) {
     return new HttpError(500, 'server_misconfigured', 'The server cannot reach Claude. Check the server configuration.');
   }
-  if (err instanceof Anthropic.BadRequestError) return new HttpError(502, 'upstream_rejected', 'Claude rejected this request.');
+  if (err instanceof Anthropic.BadRequestError) {
+    const d = upstreamDetail(err);
+    return new HttpError(502, 'upstream_rejected', `Claude rejected this request${d ? ` (${d})` : ''}.`);
+  }
   if (err instanceof Anthropic.APIConnectionTimeoutError) return new HttpError(504, 'upstream_timeout', 'Claude took too long to answer.');
   if (err instanceof Anthropic.APIUserAbortError) return new HttpError(499, 'aborted', 'Request was cancelled.');
   if (err instanceof Anthropic.APIConnectionError) return new HttpError(502, 'upstream_unreachable', 'Could not reach Claude.');
