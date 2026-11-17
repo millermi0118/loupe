@@ -11,7 +11,7 @@ Built for creators (Gen Z, Gen Alpha) and the entertainment industry.
 1. **Your look:** upload past edited photos once. Loupe learns your face retouching (skin brightness, warmth, smoothness) and your overall style, and saves the profile for next time.
 2. **New shoot:** drop a whole shoot with a short brief, like "6 picks, warm film vibe, no closed eyes".
 3. **Pick:** photos are grouped into scenes by capture time and GPS, near-duplicate bursts are collapsed, and every frame is scored on your taste, faces (eyes open, smile, head turn), sharpness, exposure, framing and color. Picks learn from This or That and from every pick or un-pick you make.
-4. **Edit:** Match my look retouches faces only, to match your past edits. Manual sliders handle the rest.
+4. **Edit:** Match my look retouches faces only, to match your past edits: skin (brightness, warmth, smoothness) and proportions (eye and nose size relative to the face, face width, jaw, lower face), nudged toward the median of your past edits. Face shape sliders (slim face, V-line jaw, chin, eyes, nose, lips) and photo sliders handle the rest. Enlarge opens a zoomable before/after view to check detail.
 5. **Cover:** each pick is reframed per app around the face (eye height, face size, UI safe zones, title space) and ranked on what that feed rewards.
 
 The full design, including what changes for production, is in [`app/blueprint.html`](app/blueprint.html) (also linked as "How it works" in the app).
@@ -49,6 +49,7 @@ app/
     analyze.js      per-photo measurements, embeddings, skin stats
     faces.js        face detection + 68 landmarks (face-api / TF.js)
     edit.js         face-only retouch, manual adjustments (3D LUT), grain
+    shape.js        face reshape warps, face proportions, proportion matching
     covers.js       per-platform framing and cover ranking
     vault.js        saved profile (Claude account db, or browser IndexedDB)
     exif.js         capture time, camera, GPS
