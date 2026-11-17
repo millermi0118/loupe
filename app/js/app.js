@@ -30,7 +30,9 @@ const S = {
   shots: [], scenes: [], picks: [], locked: new Set(), banned: new Set(), inspect: null, sampleShots: false, culled: false,
   adj: {}, active: null, split: 0.5, safe: true, coverChoice: {}, editedCache: {}, busy: null,
   sample: null, sampleImages: null, useClaude: true, judging: null,
-  server: null, // Loupe backend limits when /api/health answers (local prototype); judging then goes through it
+  server: null, // backend limits from /api/health, fetched when a cull starts
+  selMode: 'local', // 'claude': picks come from Claude's selection; 'local': on-device scoring
+  ai: null, // Claude selection run: { state: 'preparing'|'analyzing'|'done'|'failed', ... }
 };
 
 const area = (b) => (b[2] - b[0]) * (b[3] - b[1]);
@@ -58,16 +60,22 @@ capability('sample').then(async (s) => {
   S.sampleImages = lim?.images || null;
   if (S.step === 'pick') render();
 });
-// The Loupe backend (server/), when this page is served by it. Holds the Anthropic key server-side.
-(async () => {
-  try {
-    const r = await fetch('/api/health', { cache: 'no-store', signal: AbortSignal.timeout(3000) });
-    const h = r.ok && /json/.test(r.headers.get('content-type') || '') ? await r.json() : null;
-    if (h?.ok && h.judge && h.limits) { S.server = h.limits; if (S.step === 'pick' || S.step === 'brief') render(); }
-  } catch (e) { /* no backend: artifact or static hosting */ }
+// Where the Loupe backend lives (it holds the Anthropic key; the browser never does):
+//  - running locally (localhost): the same origin, i.e. the Node server in server/ serving this page
+//  - deployed (e.g. Vercel): the URL in <meta name="loupe-api-base"> in index.html (the Render service)
+//  - localStorage "loupe.apiBase" overrides both, for testing against another backend
+const IN_ARTIFACT = !!window.claude?.use;
+const API_BASE = (() => {
+  if (IN_ARTIFACT) return null; // the published artifact uses its own Claude capability
+  try { const o = localStorage.getItem('loupe.apiBase'); if (o) return o.trim().replace(/\/+$/, ''); } catch (e) { /* storage blocked */ }
+  if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return '';
+  const meta = document.querySelector('meta[name="loupe-api-base"]')?.content?.trim().replace(/\/+$/, '');
+  return meta || null;
 })();
-// Claude judging is available through the backend (preferred) or the artifact's sample capability.
-const canJudge = () => !!(S.server || (S.sample && S.sampleImages));
+const apiUrl = (path) => API_BASE + path;
+// Claude selection through the backend, or (in the artifact) Claude judging through the sample capability.
+const claudeRoute = () => (API_BASE !== null ? 'server' : S.sample && S.sampleImages ? 'artifact' : null);
+const canJudge = () => !!claudeRoute();
 
 /* ---------------- ingest ---------------- */
 
@@ -150,10 +158,52 @@ function cull() {
   S.active = S.picks[0]?.id || null;
 }
 
+// "Cull frames": local preprocessing (scenes, bursts, technical scores) always runs; the final
+// choice then comes from Claude when it's connected and enabled, or from local scoring by choice.
+function startCull() {
+  S.ai?.ctrl?.abort();
+  S.ai = null;
+  const route = claudeRoute();
+  S.selMode = route === 'server' && S.useClaude ? 'claude' : 'local';
+  if (S.selMode === 'local' && route === 'server') S.ai = { state: 'local' };
+  cull();
+  go('pick');
+  if (S.selMode === 'claude') runClaudeSelection();
+  else if (route === 'artifact' && S.useClaude) judgeWithClaude();
+}
+
 function rescore() {
   scoreShots(S.shots, S.profile, S.dir);
   S.picks = selectPicks(S.shots, S.weights, Math.max(S.target, S.locked.size), S.locked, S.banned);
+  if (S.selMode === 'claude') S.picks = claudePicks();
   S.picks.sort((a, b) => (a.time || 0) - (b.time || 0) || a.id.localeCompare(b.id, undefined, { numeric: true }));
+}
+
+// Picks from Claude's answer: its selection first, then its ranking if the creator removed some;
+// manual adds (locked) and removals (banned) still apply. Nothing until Claude has answered.
+function claudePicks() {
+  const ai = S.ai;
+  if (!ai?.ranking) return [];
+  const rank = new Map(ai.ranking.map((id, i) => [id, i]));
+  // near-duplicates follow Claude's choice: the best-ranked frame in each burst leads it
+  const lead = {};
+  for (const s of S.shots) {
+    if (!rank.has(s.id)) continue;
+    const cur = lead[s.burst];
+    if (!cur || rank.get(s.id) < rank.get(cur.id)) lead[s.burst] = s;
+  }
+  const chosen = new Set(ai.selected.map((x) => x.id));
+  for (const s of S.shots) {
+    if (!rank.has(s.id)) continue; // not sent: keeps the local burst grouping
+    s.dupOf = !chosen.has(s.id) && lead[s.burst] && lead[s.burst] !== s ? lead[s.burst].id : null;
+  }
+  const want = Math.max(S.target, S.locked.size);
+  const out = S.shots.filter((s) => S.locked.has(s.id));
+  const add = (id) => { const s = byId(id); if (s && out.length < want && !out.includes(s) && !S.banned.has(id)) out.push(s); };
+  ai.selected.forEach((x) => add(x.id));
+  ai.ranking.forEach((id) => { if (!byId(id)?.dupOf) add(id); });
+  ai.ranking.forEach(add);
+  return out;
 }
 
 const byId = (id) => S.shots.find((s) => s.id === id);
@@ -207,6 +257,7 @@ function wireDrop(zone, onFiles) {
 
 function canGo(id) {
   if (id === 'look' || id === 'brief') return true;
+  if (id === 'pick') return S.culled;
   return S.culled && S.picks.length > 0;
 }
 
@@ -378,9 +429,11 @@ function renderBrief(app) {
       </div>
       <aside class="side">
         <div class="panel stack">
-          ${canJudge() ? `<label class="row" style="font-weight:600"><input type="checkbox" id="useClaude" ${S.useClaude ? 'checked' : ''}> Let Claude judge faces and your taste</label>
-            <p class="note">Claude sees small thumbnails of the shoot next to 3 of your past edits and rates each frame on how likely you'd post it, plus eyes, expression and angle. ${S.server ? 'Thumbnails go through the Loupe server to the Anthropic API.' : 'It asks permission the first time.'}</p>`
-          : '<p class="note">Here, taste is estimated from how similar each frame is to your past posts. On the published page, Claude can also judge expressions and your taste from examples.</p>'}
+          ${claudeRoute() === 'server' ? `<label class="row" style="font-weight:600"><input type="checkbox" id="useClaude" ${S.useClaude ? 'checked' : ''}> Let Claude choose the picks</label>
+            <p class="note">Loupe checks the shoot on your device first, then sends small previews (480px JPEGs, no originals, no location) of up to ${S.server?.maxCandidates || 40} frames and 3 of your past edits to the Loupe server, which asks Claude to look at every frame and choose. Each run uses Anthropic API credits.</p>`
+          : claudeRoute() === 'artifact' ? `<label class="row" style="font-weight:600"><input type="checkbox" id="useClaude" ${S.useClaude ? 'checked' : ''}> Let Claude judge faces and your taste</label>
+            <p class="note">Claude sees small thumbnails of the shoot next to 3 of your past edits and rates each frame on how likely you'd post it, plus eyes, expression and angle. It asks permission the first time.</p>`
+          : '<p class="note"><b>Claude isn\'t connected on this page</b>, so picks use on-device scoring: similarity to your past posts plus sharpness, exposure, faces and framing.</p>'}
           <h2>What happens next</h2>
           <dl class="kv">
             <dt class="mono">1</dt><dd style="text-align:left">Cluster by capture time and GPS into scenes</dd>
@@ -426,9 +479,11 @@ function renderPick(app) {
       </div>
       <div class="row"><span id="busy" class="busy" hidden></span>
         <button class="btn" data-act="duel">This or that</button>
-        ${canJudge() ? (S.judging ? '<button class="btn" data-act="stopJudge">Stop Claude</button>' : `<button class="btn" data-act="faces">${S.shots.some((x) => x.judge) ? 'Re-judge' : 'Judge'} with Claude</button>`) : ''}
-        <button class="btn hot" data-go="edit">Edit picks →</button></div>
+        ${claudeRoute() === 'server' ? (aiBusy() ? '<button class="btn" data-act="stopAi">Cancel</button>' : `<button class="btn" data-act="runAi">${S.selMode === 'claude' && S.ai?.state === 'done' ? 'Ask Claude again' : 'Select with Claude'}</button>`)
+          : canJudge() ? (S.judging ? '<button class="btn" data-act="stopJudge">Stop Claude</button>' : `<button class="btn" data-act="faces">${S.shots.some((x) => x.judge) ? 'Re-judge' : 'Judge'} with Claude</button>`) : ''}
+        <button class="btn hot" data-go="edit" ${S.picks.length ? '' : 'disabled'}>Edit picks →</button></div>
     </div>
+    ${aiBannerHTML()}
     <div class="grid2">
       <div>${S.scenes.map((sc, i) => sceneHTML(sc, i)).join('')}</div>
       <aside class="side">
@@ -437,10 +492,14 @@ function renderPick(app) {
             <div class="count">${S.picks.length}<small> / ${S.target} asked</small></div>
             <div class="chips">${S.dir.tags.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</div>
           </div>
-          <div class="picklist">${S.picks.map((p) => `
+          <div class="picklist">${S.picks.length ? S.picks.map((p) => {
+            const c = S.selMode === 'claude' && aiPick(p.id);
+            return `
             <div class="pick"><img src="${p.url}" alt="">
-              <div><div class="mono" style="font-size:12px">${esc(p.name)} · ${pct(p.score)}</div>
-              <div class="chips">${reasonsFor(p, S.weights, S.profile).map((r) => `<span class="chip">${esc(r)}</span>`).join('')}</div></div></div>`).join('')}</div>
+              <div><div class="mono" style="font-size:12px">${esc(p.name)} · ${c ? `Claude #${c.rank}` : S.locked.has(p.id) ? 'your pick' : pct(p.score)}</div>
+              ${c?.reason ? `<div class="note" style="margin-top:2px">${esc(c.reason)}</div>`
+                : S.selMode === 'claude' ? '' : `<div class="chips">${reasonsFor(p, S.weights, S.profile).map((r) => `<span class="chip">${esc(r)}</span>`).join('')}</div>`}</div></div>`;
+          }).join('') : `<p class="note">${aiBusy() ? 'Claude is choosing…' : S.ai?.state === 'failed' ? 'No picks yet. Try Claude again, or use local-only selection.' : 'No picks yet.'}</p>`}</div>
         </div>
         ${ins ? inspectorHTML(ins) : ''}
       </aside>
@@ -473,7 +532,7 @@ function frameHTML(s) {
     ${flags.join('')}
     <button class="x" data-act="toggle" data-id="${s.id}" aria-label="${picked ? 'Remove from picks' : 'Add to picks'}" aria-pressed="${picked}">${picked ? '✓' : '＋'}</button>
     ${picked ? LOOP : ''}
-    <div class="meta"><span>${num}${s.burstSize > 1 ? 'A' : ''}</span><span>${pct(s.score)}</span></div>
+    <div class="meta"><span>${num}${s.burstSize > 1 ? 'A' : ''}</span><span>${S.selMode === 'claude' && S.ai?.rankOf?.[s.id] ? '#' + S.ai.rankOf[s.id] : pct(s.score)}</span></div>
   </div>`;
 }
 
@@ -484,8 +543,9 @@ function inspectorHTML(s) {
     <div class="row" style="justify-content:space-between"><h2>Frame ${S.shots.indexOf(s) + 1}</h2><span class="score">${pct(s.score)}<small> /100</small></span></div>
     <div class="note mono">${esc(s.name)} · ${fmtClock(s.time)}${cam ? '<br>' + esc(cam) : ''}</div>
     <div class="feat">${FEATURES.map((f) => `<div class="wt"><span>${f.label}</span><div class="bar"><i style="width:${pct(s.x[f.key])}%"></i></div><span class="mono">${pct(s.x[f.key])}</span></div>`).join('')}</div>
+    ${S.selMode === 'claude' && S.ai?.rankOf?.[s.id] ? `<p class="note"><b>Claude ranked this #${S.ai.rankOf[s.id]} of ${S.ai.ranking.length}.</b>${aiPick(s.id)?.reason ? ' ' + esc(aiPick(s.id).reason) : ''}</p>` : ''}
     ${s.judge ? `<p class="note">Claude: ${esc(s.judge.note || '')}</p>` : '<p class="note">Taste and face scores are estimates (similarity to your past posts, skin regions) until Claude judges this frame.</p>'}
-    ${s.dupOf ? `<p class="note">Near-duplicate of frame ${S.shots.indexOf(byId(s.dupOf)) + 1}, which scored higher.</p>` : ''}
+    ${s.dupOf ? `<p class="note">Near-duplicate of frame ${S.shots.indexOf(byId(s.dupOf)) + 1}, which ${S.selMode === 'claude' ? 'Claude ranked higher' : 'scored higher'}.</p>` : ''}
   </div>`;
 }
 
@@ -605,6 +665,36 @@ function applyJudgments(batch, res) {
   });
 }
 
+/* ---- Claude selection through the Loupe backend ---- */
+
+const aiBusy = () => S.ai?.state === 'preparing' || S.ai?.state === 'analyzing';
+const aiPick = (id) => S.ai?.selected?.find((x) => x.id === id) || null;
+const fmtUsd = (v) => (v == null ? '' : v < 0.01 ? '<$0.01' : '$' + v.toFixed(2));
+const fmtK = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+
+// Simple on-device checks sent as hints. Claude is told to trust the image over these.
+function localFlags(s) {
+  const f = [];
+  if (s.x?.sharp != null && s.x.sharp < 0.2) f.push('blurry');
+  if (s.feat.meanL < 22 || s.feat.clipLo > 0.25) f.push('dark');
+  if (s.feat.clipHi > 0.12) f.push('bright');
+  if (s.eyes != null && s.eyes < 0.4) f.push('eyes_closed');
+  if (Array.isArray(s.faces) && !s.faces.length && s.feat.skinFrac < 0.01) f.push('no_face');
+  return f;
+}
+
+// Which frames to send when the shoot is bigger than one request allows: whole bursts in
+// order of their best local score, so near-duplicates are always compared side by side.
+function aiCandidates(max) {
+  if (S.shots.length <= max) return S.shots.slice();
+  const byBurst = new Map();
+  for (const s of S.shots) (byBurst.get(s.burst) || byBurst.set(s.burst, []).get(s.burst)).push(s);
+  const groups = [...byBurst.values()].map((g) => g.sort((a, b) => b.score - a.score)).sort((a, b) => b[0].score - a[0].score);
+  const out = [];
+  for (const g of groups) for (const s of g) if (out.length < max) out.push(s);
+  return out;
+}
+
 async function toBase64(blob) {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let bin = '';
@@ -612,26 +702,144 @@ async function toBase64(blob) {
   return btoa(bin);
 }
 
-// One batch through the Loupe backend. Sends only the small JPEG thumbnails (480px), never originals.
-async function serverSelect(refs, batch, signal) {
-  const body = {
-    brief: S.brief.slice(0, 500),
-    references: await Promise.all(refs.map(async (r, i) => ({ id: `ref-${i + 1}`, data: await toBase64(r.thumb) }))),
-    candidates: await Promise.all(batch.map(async (b) => ({ id: b.id, data: await toBase64(b.thumb) }))),
-  };
-  const r = await fetch('/api/select', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
+async function apiError(r) {
   const out = await r.json().catch(() => null);
-  if (!r.ok) { const e = new Error(out?.error?.message || `Server error ${r.status}`); e.code = out?.error?.code; throw e; }
-  return out;
+  const e = new Error(out?.error?.message || `The Loupe server answered ${r.status}.`);
+  e.code = out?.error?.code || `http_${r.status}`;
+  e.requestId = out?.requestId;
+  return e;
+}
+
+// Cull with Claude: local preprocessing already ran in cull(); this sends previews + metadata
+// to POST /api/select and shows Claude's choice. Failure never falls back to local scoring on its own.
+async function runClaudeSelection() {
+  if (claudeRoute() !== 'server' || aiBusy()) return;
+  const ctrl = new AbortController();
+  S.selMode = 'claude';
+  S.ai = { state: 'preparing', ctrl, startedAt: Date.now(), detail: 'Checking the shoot on your device…' };
+  S.picks = [];
+  render();
+  try {
+    // limits (and a wake-up call: free Render services sleep and can take ~a minute to start)
+    if (!S.server) {
+      S.ai.detail = 'Connecting to the Loupe server…';
+      render();
+      const h = await fetch(apiUrl('/api/health'), { cache: 'no-store', signal: AbortSignal.any ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(90000)]) : ctrl.signal });
+      if (!h.ok) throw await apiError(h);
+      const health = await h.json();
+      if (!health?.ok || !health.limits) throw Object.assign(new Error('The Loupe server did not answer as expected.'), { code: 'bad_health' });
+      S.server = { ...health.limits, model: health.model };
+    }
+    const max = S.server.maxCandidates;
+    const cands = aiCandidates(max);
+    const refs = spread(S.refs, Math.min(3, S.server.maxReferences));
+    const target = Math.min(S.target, cands.length);
+    S.ai.detail = `Compressing ${cands.length} previews${refs.length ? ` and ${refs.length} past edits` : ''}…`;
+    render();
+    const tooBig = (b) => b.size > S.server.maxImageBytes;
+    const body = {
+      brief: S.brief.slice(0, 500),
+      target,
+      styleTags: S.profile ? describeProfile(S.profile).slice(0, 12) : [],
+      references: await Promise.all(refs.filter((r) => !tooBig(r.thumb)).map(async (r, i) => ({ id: `ref-${i + 1}`, data: await toBase64(r.thumb) }))),
+      candidates: await Promise.all(cands.filter((s) => !tooBig(s.thumb)).map(async (s) => ({
+        id: s.id,
+        data: await toBase64(s.thumb),
+        meta: {
+          ...(s.time ? { takenAt: new Date(s.time).toISOString() } : {}),
+          ...(s.origW ? { width: s.origW, height: s.origH } : {}),
+          scene: s.scene ?? 0, burst: s.burst ?? 0, burstSize: s.burstSize || 1,
+          flags: localFlags(s),
+        },
+      }))),
+    };
+    if (ctrl.signal.aborted) throw Object.assign(new Error('Cancelled.'), { name: 'AbortError' });
+    const payloadKb = Math.round(JSON.stringify(body).length / 1024);
+    S.ai = { ...S.ai, state: 'analyzing', sent: body.candidates.length, total: S.shots.length, refs: body.references.length, payloadKb, sentAt: Date.now(),
+      detail: `Claude is looking at ${body.candidates.length} photo${body.candidates.length === 1 ? '' : 's'}${body.candidates.length < S.shots.length ? ` (of ${S.shots.length}; the rest were set aside by local checks)` : ''}${body.references.length ? ` next to ${body.references.length} of your past edits` : ''}.` };
+    render();
+    const r = await fetch(apiUrl('/api/select'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      signal: AbortSignal.any ? AbortSignal.any([ctrl.signal, AbortSignal.timeout(240000)]) : ctrl.signal,
+    });
+    if (!r.ok) throw await apiError(r);
+    const out = await r.json();
+    if (!Array.isArray(out?.selected) || !Array.isArray(out.ranking)) throw Object.assign(new Error('The Loupe server returned an unexpected answer.'), { code: 'bad_response' });
+    const sentIds = new Set(body.candidates.map((c) => c.id));
+    const ranking = out.ranking.filter((id) => sentIds.has(id));
+    applyJudgments(cands, out.results || []);
+    S.ai = {
+      state: 'done', ctrl: null, sent: body.candidates.length, total: S.shots.length,
+      selected: out.selected.filter((x) => sentIds.has(x.id)), ranking,
+      rankOf: Object.fromEntries(ranking.map((id, i) => [id, i + 1])),
+      usage: out.usage, costUsd: out.costUsd, model: out.model, requestId: out.requestId,
+      seconds: Math.round((Date.now() - S.ai.startedAt) / 100) / 10,
+    };
+    S.lastUsage = out.usage;
+    S.editedCache = {};
+    rescore();
+    S.inspect = S.picks[0]?.id || S.inspect;
+    S.active = S.picks[0]?.id || null;
+  } catch (e) {
+    const cancelled = ctrl.signal.aborted;
+    const timedOut = e?.name === 'TimeoutError';
+    const offline = e instanceof TypeError; // network or CORS failure
+    S.ai = {
+      state: 'failed', ctrl: null,
+      cancelled,
+      message: cancelled ? 'You cancelled the Claude selection.'
+        : timedOut ? 'The Loupe server took too long to answer.'
+        : offline ? `Couldn't reach the Loupe server${API_BASE ? ` at ${API_BASE}` : ''}. It may be asleep, down, or not allowing this site (CORS).`
+        : e?.message || 'Something went wrong.',
+      code: cancelled ? 'cancelled' : timedOut ? 'timeout' : offline ? 'unreachable' : e?.code,
+      requestId: e?.requestId,
+    };
+    S.picks = [];
+  }
+  render();
+}
+
+function useLocalSelection() {
+  S.ai?.ctrl?.abort();
+  S.selMode = 'local';
+  S.ai = { state: 'local' };
+  for (const s of S.shots) s.dupOf = null;
+  rescore();
+  S.inspect = S.picks[0]?.id || null;
+  S.active = S.picks[0]?.id || null;
+  render();
+}
+
+function aiBannerHTML() {
+  const a = S.ai;
+  if (!a) {
+    if (!S.culled || claudeRoute()) return '';
+    return `<div class="ai-banner local" role="status"><div><b>Local-only selection.</b> Claude isn't connected on this page, so these picks come from on-device scoring.</div></div>`;
+  }
+  if (a.state === 'preparing') return `<div class="ai-banner busy" role="status" aria-live="polite"><span class="spin" aria-hidden="true"></span><div><b>Preparing photos</b><div class="note">${esc(a.detail || '')}</div></div></div>`;
+  if (a.state === 'analyzing') return `<div class="ai-banner busy" role="status" aria-live="polite"><span class="spin" aria-hidden="true"></span><div><b>Analyzing with Claude</b><div class="note">${esc(a.detail || '')} Sent ${a.payloadKb} KB. This usually takes 20 to 60 seconds.</div></div></div>`;
+  if (a.state === 'done') {
+    const u = a.usage || {};
+    return `<div class="ai-banner ok" role="status"><div><b>Selection complete.</b> Claude chose ${a.selected.length} of ${a.sent} photo${a.sent === 1 ? '' : 's'}${a.sent < a.total ? ` (${a.total - a.sent} set aside by local checks)` : ''}.
+      <div class="note mono">${esc(a.model || '')} · ${fmtK(u.input_tokens || 0)} in / ${fmtK(u.output_tokens || 0)} out tokens · est. ${fmtUsd(a.costUsd)} · ${a.seconds}s${a.requestId ? ` · request ${esc(a.requestId.slice(0, 8))}` : ''}</div></div></div>`;
+  }
+  if (a.state === 'failed') return `<div class="ai-banner err" role="alert"><div><b>AI selection failed.</b> ${esc(a.message)}${a.code && !a.cancelled ? ` <span class="mono note">(${esc(a.code)}${a.requestId ? ' · ' + esc(a.requestId.slice(0, 8)) : ''})</span>` : ''}
+      <div class="note">No photos were picked. Nothing is chosen for you until you decide.</div></div>
+      <div class="row"><button class="btn sm primary" data-act="runAi">Try Claude again</button><button class="btn sm" data-act="localSelect">Use local-only selection</button></div></div>`;
+  if (a.state === 'local') {
+    const why = a.auto ? 'This sample was picked on your device when the page opened; Claude hasn\'t looked at it yet.'
+      : !claudeRoute() ? 'Claude isn\'t connected on this page, so these picks come from on-device scoring.'
+      : 'Claude was not used for these picks.';
+    return `<div class="ai-banner local" role="status"><div><b>Local-only selection.</b> ${why}</div>${claudeRoute() === 'server' ? '<div class="row"><button class="btn sm primary" data-act="runAi">Select with Claude</button></div>' : ''}</div>`;
+  }
+  return '';
 }
 
 async function judgeWithClaude() {
-  if (!canJudge() || S.judging) return;
-  const viaServer = !!S.server;
-  const per = viaServer ? Math.min(16, S.server.maxReferences + S.server.maxCandidates) : Math.max(4, Math.min(S.sampleImages.maxCount || 8, 16));
-  const refs = spread(S.refs, Math.min(3, per - 3, viaServer ? S.server.maxReferences : 3));
-  const perBatch = viaServer ? Math.min(S.server.maxCandidates, per - refs.length) : per - refs.length;
-  const tokens = { input: 0, output: 0 };
+  if (claudeRoute() !== 'artifact' || S.judging) return;
+  const per = Math.max(4, Math.min(S.sampleImages.maxCount || 8, 16));
+  const refs = spread(S.refs, Math.min(3, per - 3));
+  const perBatch = per - refs.length;
   // judge everything that could make the cut, with whole bursts so a blink can lose to its sibling
   const ranked = S.shots.filter((s) => !s.dupOf).sort((a, b) => b.score - a.score);
   const bursts = new Set(ranked.slice(0, Math.max(24, S.target * 3)).map((s) => s.burst));
@@ -640,23 +848,14 @@ async function judgeWithClaude() {
   S.judging = ctrl;
   render();
   let done = 0, failed = null;
-  // the backend uses the in-browser face detector for past edits; only the artifact asks Claude for those boxes
-  if (!viaServer) { try { await findRefFaces(ctrl.signal); } catch (e) { failed = e; } }
+  try { await findRefFaces(ctrl.signal); } catch (e) { failed = e; }
   for (let i = 0; i < pool.length && !ctrl.signal.aborted && !failed; i += perBatch) {
     const batch = pool.slice(i, i + perBatch);
     setBusy(`Claude has judged ${done} of ${pool.length} frames…`);
     try {
-      let res;
-      if (viaServer) {
-        const out = await serverSelect(refs, batch, ctrl.signal);
-        res = out.results;
-        tokens.input += out.usage?.input_tokens || 0;
-        tokens.output += out.usage?.output_tokens || 0;
-      } else {
-        res = await S.sample.json(judgePrompt(refs.length, batch.length), {
-          images: [...refs.map((r) => r.thumb), ...batch.map((b) => b.thumb)], modelTier: 'default', signal: ctrl.signal,
-        });
-      }
+      const res = await S.sample.json(judgePrompt(refs.length, batch.length), {
+        images: [...refs.map((r) => r.thumb), ...batch.map((b) => b.thumb)], modelTier: 'default', signal: ctrl.signal,
+      });
       applyJudgments(batch, res);
       done += batch.length;
       rescore();
@@ -666,8 +865,7 @@ async function judgeWithClaude() {
   S.editedCache = {}; // face boxes may have changed
   setBusy(null);
   if (failed && !ctrl.signal.aborted) toast(failed.code === 'not_granted' ? 'Claude access was declined, so picks use local scores only.' : `Claude couldn't finish judging: ${failed.message || failed.code}`);
-  else if (done) toast(`Claude judged ${done} frames against your past posts. Picks updated.${tokens.input ? ` (${(tokens.input / 1000).toFixed(1)}k tokens in, ${(tokens.output / 1000).toFixed(1)}k out)` : ''}`);
-  if (tokens.input) S.lastUsage = tokens;
+  else if (done) toast(`Claude judged ${done} frames against your past posts. Picks updated.`);
   rescore();
   render();
 }
@@ -1158,7 +1356,10 @@ document.addEventListener('click', async (e) => {
     case 'resetTaste': S.weights = { ...DEFAULT_WEIGHTS }; S.duels = 0; saveTaste(); if (S.culled) rescore(); render(); break;
     case 'sampleShoot': await loadSampleShoot(); render(); break;
     case 'clearShots': S.shots = []; S.sampleShots = false; S.culled = false; S.picks = []; render(); break;
-    case 'cull': cull(); go('pick'); if (S.useClaude && canJudge()) judgeWithClaude(); break;
+    case 'cull': startCull(); break;
+    case 'runAi': runClaudeSelection(); break;
+    case 'stopAi': S.ai?.ctrl?.abort(); break;
+    case 'localSelect': useLocalSelection(); break;
     case 'inspect': S.inspect = id; render(); break;
     case 'toggle': togglePick(id); break;
     case 'duel': openDuel(); break;
@@ -1230,7 +1431,10 @@ async function backfillShapes() {
   // first visit: open in a working state with a sample profile + sample shoot, already culled
   await loadSampleRefs();
   await loadSampleShoot();
+  S.selMode = 'local';
   cull();
+  // labelled, never silent: Claude isn't called on page load (it costs API credits per run)
+  S.ai = { state: 'local', auto: true };
   S.step = 'pick';
   render();
 })();

@@ -28,16 +28,16 @@ Then open http://localhost:5178. The app opens with a sample profile and a sampl
 
 If your browser caches old JavaScript while you edit, hard-reload (Cmd+Shift+R).
 
-### Claude judging locally (Node backend)
+### Claude selection (Node backend)
 
-To let Claude judge faces and taste when running locally, start the backend instead. It keeps your Anthropic API key on the server and serves the app on the same origin:
+When a backend is connected, **Cull frames** sends small previews to it and Claude chooses the picks; the page shows each stage, and if Claude fails it asks before falling back to local scoring. Deployed, the Vercel site calls the Render backend set in the `loupe-api-base` meta tag in `app/index.html`. Locally, start the backend; it keeps your Anthropic API key on the server and serves the app on the same origin:
 
 ```bash
 cd server && npm install && cp .env.example .env   # then add ANTHROPIC_API_KEY to server/.env
 npm start                                          # http://localhost:5179
 ```
 
-Details, API contract, tests and what's needed before any public deployment: [`server/README.md`](server/README.md). It is a local prototype, not a production service.
+Deployment settings, API contract, logs, tests and what's needed before a real public service: [`server/README.md`](server/README.md). It is a prototype with no user sign-in, not a production service.
 
 ### What only works inside the Claude artifact
 

@@ -18,7 +18,6 @@ const SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
   'X-Frame-Options': 'DENY',
-  'Cross-Origin-Resource-Policy': 'same-origin',
 };
 
 export const consoleLogger = { info: (o) => console.log(JSON.stringify(o)), error: (o) => console.error(JSON.stringify(o)) };
@@ -59,7 +58,7 @@ function readBody(req, maxBytes) {
   });
 }
 
-export function createServer({ config, judge, logger = consoleLogger }) {
+export function createServer({ config, select: runSelect, budget = null, logger = consoleLogger }) {
   const allow = rateLimiter(config.rateLimitPerMinute);
   let active = 0;
 
@@ -92,6 +91,7 @@ export function createServer({ config, judge, logger = consoleLogger }) {
     // from spending this server's Anthropic credits through a visitor's browser.
     if (origin && !config.allowedOrigins.has(origin)) throw new HttpError(403, 'origin_not_allowed', 'This origin may not use the API');
     if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) throw new HttpError(415, 'unsupported_media_type', 'Send application/json');
+    if (budget?.exhausted()) throw new HttpError(503, 'budget_exhausted', "Today's Claude budget for this server is used up. Try again tomorrow or use local selection.");
     const ip = req.socket.remoteAddress || 'unknown';
     if (!allow(ip)) throw new HttpError(429, 'rate_limited', 'Too many requests. Wait a minute and try again.');
     if (active >= config.maxConcurrent) throw new HttpError(503, 'busy', 'The server is busy. Try again shortly.');
@@ -106,14 +106,10 @@ export function createServer({ config, judge, logger = consoleLogger }) {
     const timer = setTimeout(() => ctrl.abort(), config.requestTimeoutMs);
     const onClose = () => { if (!res.writableEnded) ctrl.abort(); };
     res.on('close', onClose);
-    const t0 = Date.now();
     try {
-      const out = await judge(input, { signal: ctrl.signal });
-      logger.info({
-        rid, event: 'judged', references: input.references.length, candidates: input.candidates.length,
-        imageBytes: [...input.references, ...input.candidates].reduce((s, x) => s + x.bytes, 0),
-        judged: out.results.length, missing: out.missing.length, model: out.model, usage: out.usage, ms: Date.now() - t0,
-      });
+      logger.info({ rid, event: 'select_received', references: input.references.length, candidates: input.candidates.length, target: input.target,
+        imageBytes: [...input.references, ...input.candidates].reduce((s, x) => s + x.bytes, 0) });
+      const out = await runSelect(input, { signal: ctrl.signal, rid });
       sendJson(res, 200, { requestId: rid, ...out });
     } finally {
       active--;
@@ -127,11 +123,25 @@ export function createServer({ config, judge, logger = consoleLogger }) {
     const t0 = Date.now();
     let url;
     try { url = new URL(req.url, 'http://localhost'); } catch { return sendJson(res, 400, { error: { code: 'bad_url', message: 'Bad URL' } }); }
+    // CORS for the API: only listed origins (e.g. the Vercel site) get the allow headers.
+    if (url.pathname.startsWith('/api/')) {
+      const origin = req.headers.origin;
+      if (origin && config.allowedOrigins.has(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Type');
+      }
+      res.setHeader('Vary', 'Origin');
+      if (req.method === 'OPTIONS') {
+        if (!origin || !config.allowedOrigins.has(origin)) return sendJson(res, 403, { error: { code: 'origin_not_allowed', message: 'This origin may not use the API' } });
+        res.writeHead(204, { ...SECURITY_HEADERS, 'Access-Control-Allow-Methods': 'GET, POST', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Max-Age': '600' });
+        return res.end();
+      }
+    }
     try {
       if (url.pathname === '/api/health') {
         if (req.method !== 'GET') throw new HttpError(405, 'method_not_allowed', 'Use GET');
         const { maxReferences, maxCandidates, maxImageBytes, maxImageSide } = config.limits;
-        return sendJson(res, 200, { ok: true, judge: true, limits: { maxReferences, maxCandidates, maxImageBytes, maxImageSide } });
+        return sendJson(res, 200, { ok: true, judge: true, model: config.model, limits: { maxReferences, maxCandidates, maxImageBytes, maxImageSide } });
       }
       if (url.pathname === '/api/select') {
         if (req.method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Use POST');

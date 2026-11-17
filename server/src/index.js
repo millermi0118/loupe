@@ -1,7 +1,8 @@
 // Entry point: load config, build the Anthropic client from server-side env, start listening.
 import Anthropic from '@anthropic-ai/sdk';
 import { loadDotEnv, loadConfig } from './config.js';
-import { createJudge } from './judge.js';
+import { createSelector } from './judge.js';
+import { dailyBudget } from './pricing.js';
 import { createServer, consoleLogger } from './server.js';
 
 loadDotEnv();
@@ -12,14 +13,17 @@ if (!config.hasApiKey) {
   process.exit(1);
 }
 
-// Reads ANTHROPIC_API_KEY from the environment. Retries 429/5xx/connection errors twice.
-const client = new Anthropic({ maxRetries: 2, timeout: config.requestTimeoutMs });
-const judge = createJudge({ client, model: config.model, effort: config.effort, fallbacks: config.fallbacks });
-const server = createServer({ config, judge, logger: consoleLogger });
+// Reads ANTHROPIC_API_KEY from the environment. One retry on 429/5xx/connection errors keeps
+// the worst-case wait (and spend) bounded.
+const client = new Anthropic({ maxRetries: 1, timeout: config.requestTimeoutMs });
+const budget = dailyBudget(config.dailyBudgetUsd);
+const select = createSelector({ client, model: config.model, effort: config.effort, fallbacks: config.fallbacks, logger: consoleLogger, budget });
+const server = createServer({ config, select, budget, logger: consoleLogger });
 
 server.listen(config.port, config.host, () => {
   const { port } = server.address();
-  console.log(`Loupe server on http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${port}  (model ${config.model}, effort ${config.effort})`);
+  console.log(`Loupe server on http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${port}  (model ${config.model}, effort ${config.effort}, daily budget ${config.dailyBudgetUsd ? '$' + config.dailyBudgetUsd : 'none'})`);
+  console.log(`Allowed browser origins: ${[...config.allowedOrigins].join(', ')}`);
   if (config.host !== '127.0.0.1' && config.host !== 'localhost') {
     console.warn(`Listening on ${config.host}. This prototype has no user authentication; anyone who can reach this port can use the Anthropic key. Set HOST=127.0.0.1 for local-only use.`);
   }

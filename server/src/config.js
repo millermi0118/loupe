@@ -34,8 +34,11 @@ export function loadConfig(env = process.env) {
   // All interfaces, so a host's port scan can reach the server. Set HOST=127.0.0.1 to keep it on this machine only.
   const host = env.HOST || '0.0.0.0';
   const staticDir = env.STATIC_DIR === '' ? null : path.resolve(SERVER_ROOT, env.STATIC_DIR || '../app');
+  // Browser origins allowed to call the API (CORS). Set ALLOWED_ORIGINS to the Vercel site's origin in production.
+  const trimSlash = (s) => s.trim().replace(/\/+$/, '');
   const origins = (env.ALLOWED_ORIGINS || `http://localhost:${port},http://127.0.0.1:${port}`)
-    .split(',').map((s) => s.trim()).filter(Boolean);
+    .split(',').map(trimSlash).filter(Boolean);
+  if (env.RENDER_EXTERNAL_URL) origins.push(trimSlash(env.RENDER_EXTERNAL_URL)); // page served by Render itself
   return {
     hasApiKey: Boolean(env.ANTHROPIC_API_KEY),
     model: env.ANTHROPIC_MODEL || 'claude-opus-5-5',
@@ -45,15 +48,17 @@ export function loadConfig(env = process.env) {
     host, port, staticDir,
     allowedOrigins: new Set(origins),
     limits: {
-      maxBodyBytes: int(env.MAX_BODY_BYTES, 6 * 1024 * 1024, 64 * 1024, 32 * 1024 * 1024),
+      maxBodyBytes: int(env.MAX_BODY_BYTES, 8 * 1024 * 1024, 64 * 1024, 32 * 1024 * 1024),
       maxImageBytes: int(env.MAX_IMAGE_BYTES, 512 * 1024, 4 * 1024, 4 * 1024 * 1024),
       maxImageSide: int(env.MAX_IMAGE_SIDE, 1024, 64, 4096),
       maxReferences: int(env.MAX_REFERENCES, 3, 0, 8),
-      maxCandidates: int(env.MAX_CANDIDATES, 13, 1, 16),
+      maxCandidates: int(env.MAX_CANDIDATES, 40, 1, 60), // all sent in one Claude request
       maxBriefChars: 500,
     },
     rateLimitPerMinute: int(env.RATE_LIMIT_PER_MINUTE, 20, 1, 1000),
     maxConcurrent: int(env.MAX_CONCURRENT, 2, 1, 32),
-    requestTimeoutMs: int(env.REQUEST_TIMEOUT_MS, 120000, 5000, 600000),
+    requestTimeoutMs: int(env.REQUEST_TIMEOUT_MS, 180000, 5000, 600000),
+    // estimated Anthropic spend per UTC day before /api/select refuses (0 = no cap)
+    dailyBudgetUsd: Math.max(0, Number.parseFloat(env.DAILY_BUDGET_USD ?? '5') || 0),
   };
 }

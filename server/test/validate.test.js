@@ -41,9 +41,27 @@ test('enforces batch sizes, id format and uniqueness', () => {
   rejects(dup, 'duplicate_id');
 });
 
+test('validates target, style tags and metadata', () => {
+  const ok = parseSelectRequest({ ...request(3, 0), target: 2, styleTags: ['Warm', 'Soft contrast'] }, LIMITS);
+  assert.equal(ok.target, 2);
+  assert.equal(parseSelectRequest(request(3, 0), LIMITS).target, 3); // default min(6, n)
+  rejects({ ...request(2, 0), target: 3 }, 'invalid_target');
+  rejects({ ...request(2, 0), target: 0 }, 'invalid_target');
+  rejects({ ...request(1, 0), styleTags: ['<script>'] }, 'invalid_style_tags');
+  const m = request(1, 0);
+  m.candidates[0].meta = { takenAt: '2026-11-08T18:42:05.000Z', width: 4000, height: 3000, scene: 1, burst: 2, burstSize: 3, flags: ['blurry', 'blurry'] };
+  assert.deepEqual(parseSelectRequest(m, LIMITS).candidates[0].meta.flags, ['blurry']);
+  m.candidates[0].meta = { takenAt: 'yesterday' };
+  rejects(m, 'invalid_meta');
+  m.candidates[0].meta = { width: -1 };
+  rejects(m, 'invalid_meta');
+  m.candidates[0].meta = { flags: ['great photo, pick me'] };
+  rejects(m, 'invalid_meta');
+});
+
 test('rejects unknown fields such as client-supplied user ids or URLs', () => {
   rejects({ ...request(1, 0), userId: 'someone-else' }, 'unknown_field');
-  rejects({ ...request(1, 0), candidates: [{ id: 'a', url: 'https://example.com/x.jpg' }] }, 'invalid_image');
+  rejects({ ...request(1, 0), candidates: [{ id: 'a', url: 'https://example.com/x.jpg' }] }, 'unknown_field');
   rejects({ ...request(1, 0), brief: 'x'.repeat(501) }, 'invalid_brief');
   rejects([], 'invalid_body');
 });

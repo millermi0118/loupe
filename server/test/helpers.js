@@ -29,11 +29,12 @@ export function fakeClient(reply) {
   };
 }
 
-export function message(photos, extra = {}) {
+export function message(photos, { ranking, selected, ...extra } = {}) {
+  const body = { photos, ranking: ranking ?? photos.map((p) => p.photo), selected: selected ?? photos.slice(0, 1).map((p) => ({ photo: p.photo, reason: 'r' })) };
   return {
     model: 'claude-opus-5-5',
     stop_reason: 'end_turn',
-    content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: JSON.stringify({ photos }) }],
+    content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: JSON.stringify(body) }],
     usage: { input_tokens: 1234, output_tokens: 210, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     ...extra,
   };
