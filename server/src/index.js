@@ -21,7 +21,7 @@ server.listen(config.port, config.host, () => {
   const { port } = server.address();
   console.log(`Loupe server on http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${port}  (model ${config.model}, effort ${config.effort})`);
   if (config.host !== '127.0.0.1' && config.host !== 'localhost') {
-    console.warn('Warning: listening beyond this machine. This prototype has no user authentication; do not expose it publicly.');
+    console.warn(`Listening on ${config.host}. This prototype has no user authentication; anyone who can reach this port can use the Anthropic key. Set HOST=127.0.0.1 for local-only use.`);
   }
 });
 

@@ -126,7 +126,8 @@ Errors: `{ "requestId": "…", "error": { "code": "…", "message": "…" } }` w
 
 - The key is read by the SDK from `ANTHROPIC_API_KEY` on the server. It is never in browser code,
   responses or logs. `.env` is git-ignored; only `.env.example` is committed.
-- Listens on `127.0.0.1` by default.
+- Listens on `0.0.0.0` (all interfaces) and `PORT` (default 5179), as hosts like Render require.
+  Set `HOST=127.0.0.1` in `.env` to keep a local run on this machine only.
 - Cross-site protection: requests with an `Origin` other than the allowed list get 403, and only
   `application/json` is accepted, so another website can't make your browser spend your credits.
 - Strict input checks: count, byte size, JPEG signature and dimensions, base64 format, id format,

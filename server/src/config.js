@@ -29,8 +29,10 @@ const int = (v, def, min, max) => {
 };
 
 export function loadConfig(env = process.env) {
+  // PORT is set by hosts such as Render; 5179 is the local default.
   const port = int(env.PORT, 5179, 0, 65535);
-  const host = env.HOST || '127.0.0.1';
+  // All interfaces, so a host's port scan can reach the server. Set HOST=127.0.0.1 to keep it on this machine only.
+  const host = env.HOST || '0.0.0.0';
   const staticDir = env.STATIC_DIR === '' ? null : path.resolve(SERVER_ROOT, env.STATIC_DIR || '../app');
   const origins = (env.ALLOWED_ORIGINS || `http://localhost:${port},http://127.0.0.1:${port}`)
     .split(',').map((s) => s.trim()).filter(Boolean);
